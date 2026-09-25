@@ -16,7 +16,7 @@ from nanobot.orchestration.scheduler import (
     Scheduler,
     scheduler_context,
 )
-from nanobot.providers.base import GenerationSettings, LLMResponse
+from nanobot.providers.base import GenerationSettings, LLMProvider, LLMResponse
 from nanobot.providers.fallback_provider import FallbackProvider
 from nanobot.utils.llm_runtime import LLMRuntime
 from orchestration.sim import ScriptedProvider
@@ -259,6 +259,84 @@ async def test_all_saturated_candidates_wait_then_use_the_lane_that_frees() -> N
 
 
 @pytest.mark.asyncio
+async def test_reserved_fallback_retry_reacquires_after_429_and_lane_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nanobot.providers.base as provider_base
+
+    scheduler = Scheduler(default_limit=1)
+    primary = ScriptedProvider({}, route=lambda _messages: "unused", default_model="primary")
+    first_response = asyncio.Event()
+    second_attempt = asyncio.Event()
+
+    class RetryFallback(ScriptedProvider):
+        attempts = 0
+
+        async def chat(self, **kwargs: Any) -> LLMResponse:
+            self.attempts += 1
+            if self.attempts == 1:
+                first_response.set()
+                return LLMResponse(
+                    content="HTTP 429 rate limit",
+                    finish_reason="error",
+                    error_status_code=429,
+                    error_kind="http",
+                    retry_after=0.03,
+                )
+            second_attempt.set()
+            return LLMResponse(content="recovered", finish_reason="stop")
+
+    fallback_leaf = RetryFallback(
+        {}, route=lambda _messages: "unused", default_model="fallback"
+    )
+    fallback = FallbackProvider(
+        ScheduledProvider(primary, scheduler),
+        [ModelPresetConfig(model="fallback", provider="scripted")],
+        lambda _preset: ScheduledProvider(fallback_leaf, scheduler),
+    )
+    fallback._CHAT_RETRY_DELAYS = (0, 0, 0)
+    monkeypatch.setattr(provider_base, "RETRY_AFTER_BUFFER", 0)
+    primary_lease = await scheduler.acquire(ProviderLane("scripted", "primary"))
+    fallback_lease = await scheduler.acquire(ProviderLane("scripted", "fallback"))
+    request = asyncio.create_task(
+        fallback.chat_with_retry(
+            messages=[{"role": "user", "content": "hi"}], model="primary"
+        )
+    )
+    for lane in (
+        ProviderLane("scripted", "primary"),
+        ProviderLane("scripted", "fallback"),
+    ):
+        while not scheduler._has_waiters(scheduler._lane(lane)):
+            await asyncio.sleep(0)
+
+    release_competitor = asyncio.Event()
+    competitor_admitted = asyncio.Event()
+
+    async def competitor() -> None:
+        lease = await scheduler.acquire(ProviderLane("scripted", "fallback"))
+        competitor_admitted.set()
+        await release_competitor.wait()
+        await lease.release()
+
+    external = asyncio.create_task(competitor())
+    await fallback_lease.release()
+    await asyncio.wait_for(first_response.wait(), timeout=0.2)
+    await asyncio.wait_for(competitor_admitted.wait(), timeout=0.2)
+
+    assert not second_attempt.is_set()
+    assert not request.done()
+
+    release_competitor.set()
+    response = await asyncio.wait_for(request, timeout=0.3)
+    await asyncio.wait_for(external, timeout=0.2)
+    await primary_lease.release()
+
+    assert response.content == "recovered"
+    assert fallback_leaf.attempts == 2
+
+
+@pytest.mark.asyncio
 async def test_fair_queue_lease_is_used_by_selected_candidate_without_releasing_it() -> None:
     scheduler = Scheduler(default_limit=1)
     primary = ScriptedProvider({}, route=lambda _messages: "unused", default_model="primary")
@@ -495,38 +573,152 @@ async def test_http_429_exception_applies_aimd_and_retry_after() -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_429_storm_backs_off_recovers_and_completes_every_request() -> None:
+    scheduler = Scheduler(default_limit=4, minimum_limit=1, maximum_limit=4)
+    lane = ProviderLane("scripted", "model")
+    first_wave_ready = asyncio.Event()
+
+    class StormProvider(ScriptedProvider):
+        def __init__(self) -> None:
+            super().__init__({}, route=lambda _messages: "unused", default_model="model")
+            self.attempts: dict[str, int] = {}
+            self.active = 0
+            self.peak_active = 0
+            self.first_attempts: list[str] = []
+            self.later_first_attempt_in_flight: list[int] = []
+
+        async def chat(self, **kwargs: Any) -> LLMResponse:
+            messages = kwargs["messages"]
+            request_id = str(messages[-1]["content"])
+            attempt = self.attempts.get(request_id, 0) + 1
+            self.attempts[request_id] = attempt
+            self.active += 1
+            self.peak_active = max(self.peak_active, self.active)
+            if attempt == 1:
+                self.first_attempts.append(request_id)
+                if len(self.first_attempts) <= 4:
+                    if len(self.first_attempts) == 4:
+                        first_wave_ready.set()
+                    await first_wave_ready.wait()
+                else:
+                    self.later_first_attempt_in_flight.append(
+                        scheduler._lane(lane).in_flight
+                    )
+                response = LLMResponse(
+                    content="HTTP 429 rate limit",
+                    finish_reason="error",
+                    error_status_code=429,
+                    error_kind="http",
+                )
+            else:
+                response = LLMResponse(content=request_id, finish_reason="stop")
+            self.active -= 1
+            return response
+
+    leaf = StormProvider()
+    provider = ScheduledProvider(leaf, scheduler)
+    provider._CHAT_RETRY_DELAYS = (0, 0, 0)
+    calls = [
+        asyncio.create_task(
+            provider.chat_with_retry(
+                messages=[{"role": "user", "content": f"request-{index}"}],
+                model="model",
+            )
+        )
+        for index in range(8)
+    ]
+
+    responses = await asyncio.wait_for(asyncio.gather(*calls), timeout=1.0)
+
+    assert all(response.finish_reason == "stop" for response in responses)
+    assert len(leaf.first_attempts) == 8
+    assert set(leaf.attempts.values()) == {2}
+    assert leaf.peak_active == 4
+    assert max(leaf.later_first_attempt_in_flight) <= 2
+    assert min(leaf.later_first_attempt_in_flight) == 1
+    assert scheduler.limit_for(lane) == 4
+
+
+@pytest.mark.asyncio
+async def test_default_config_matches_unwrapped_concurrent_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nanobot.providers.factory import schedule_provider
+
+    class ConcurrentProvider(ScriptedProvider):
+        def __init__(self) -> None:
+            super().__init__({}, route=lambda _messages: "unused", default_model="model")
+            self.active = 0
+            self.peak_active = 0
+
+        async def chat(self, **kwargs: Any) -> LLMResponse:
+            self.active += 1
+            self.peak_active = max(self.peak_active, self.active)
+            await asyncio.sleep(0)
+            self.active -= 1
+            return LLMResponse(content="ok", finish_reason="stop")
+
+    monkeypatch.delenv("NANOBOT_MAX_CONCURRENT_REQUESTS", raising=False)
+
+    async def measure(provider: LLMProvider, leaf: ConcurrentProvider) -> int:
+        await asyncio.gather(*[
+            provider.chat(messages=[{"role": "user", "content": "hi"}], model="model")
+            for _ in range(12)
+        ])
+        return leaf.peak_active
+
+    raw_provider = ConcurrentProvider()
+    scheduled_leaf = ConcurrentProvider()
+    scheduled = schedule_provider(Config(), scheduled_leaf)
+    assert isinstance(scheduled, ScheduledProvider)
+
+    raw_peak = await measure(raw_provider, raw_provider)
+    scheduled_peak = await measure(scheduled, scheduled_leaf)
+
+    assert raw_peak == 12
+    assert scheduled_peak == raw_peak
+
+
+@pytest.mark.asyncio
 async def test_root_fairness_limits_10_way_fanout_p95_impact_to_under_20_percent() -> None:
-    async def p95_admission_ticket(*, include_fanout: bool) -> int:
+    service_quantum = 0.01
+
+    async def b_p95_wait(*, include_fanout: bool) -> float:
         scheduler = Scheduler(default_limit=1)
         lane = ProviderLane("provider", "model")
         held = await scheduler.acquire(lane)
-        tickets: dict[str, list[int]] = {"b": []}
-        if include_fanout:
-            tickets["a"] = []
-        admission_ticket = 0
+        clock = 0.0
+        waits: list[float] = []
 
         async def request(root: str) -> None:
-            nonlocal admission_ticket
+            nonlocal clock
+            started_at = clock
             with scheduler_context(root=root):
                 lease = await scheduler.acquire(lane)
-            admission_ticket += 1
-            tickets[root].append(admission_ticket)
+            if root == "b":
+                waits.append(clock - started_at)
+            clock += service_quantum
             await lease.release()
 
-        b_tasks = [asyncio.create_task(request("b")) for _ in range(100)]
+        background_tasks = [
+            asyncio.create_task(request(f"background-{i}")) for i in range(10)
+        ]
         a_tasks = (
             [asyncio.create_task(request("a")) for _ in range(10)]
             if include_fanout else []
         )
+        b_tasks = [asyncio.create_task(request("b")) for _ in range(2)]
         await asyncio.sleep(0)
         await held.release()
-        await asyncio.gather(*b_tasks, *a_tasks)
-        return tickets["b"][94]
+        await asyncio.gather(*background_tasks, *a_tasks, *b_tasks)
+        return sorted(waits)[-1]
 
-    baseline_p95 = await p95_admission_ticket(include_fanout=False)
-    fanout_p95 = await p95_admission_ticket(include_fanout=True)
+    baseline_p95 = await b_p95_wait(include_fanout=False)
+    fanout_p95 = await b_p95_wait(include_fanout=True)
+    fifo_p95 = 21 * service_quantum
 
     assert fanout_p95 <= baseline_p95 * 1.2
+    assert fifo_p95 > baseline_p95 * 1.2
 
 
 

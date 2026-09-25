@@ -45,6 +45,9 @@ _priority_context: contextvars.ContextVar[Priority] = contextvars.ContextVar(
 _fallback_candidate_context: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "nanobot_scheduler_fallback_candidate", default=False
 )
+_fallback_candidate_admitted: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "nanobot_scheduler_fallback_candidate_admitted", default=False
+)
 _fallback_admitted_callback: contextvars.ContextVar[
     Callable[[], Awaitable[None]] | None
 ] = contextvars.ContextVar("nanobot_scheduler_fallback_admitted_callback", default=None)
@@ -90,6 +93,10 @@ class LaneLease:
         self._scheduler = scheduler
         self.lane = lane
         self._released = False
+
+    @property
+    def released(self) -> bool:
+        return self._released
 
     async def release(self, response: LLMResponse | None = None) -> None:
         self.release_now(response)
@@ -512,13 +519,22 @@ class ScheduledProvider(LLMProvider):
         lane = self.lane_for(model)
         if _fallback_candidate_context.get():
             reserved = _reserved_lease_context.get()
-            if reserved is not None and reserved.lease.lane == lane:
+            if (
+                reserved is not None
+                and reserved.lease.lane == lane
+                and not reserved.claimed
+                and not reserved.lease.released
+            ):
                 reserved.claimed = True
                 lease = reserved.lease
+                _fallback_candidate_admitted.set(True)
+            elif _fallback_candidate_admitted.get():
+                lease = await self._scheduler.acquire(lane)
             else:
                 lease = self._scheduler.try_acquire(lane)
-            if lease is None:
-                raise LaneSaturatedError(self._scheduler, lane)
+                if lease is None:
+                    raise LaneSaturatedError(self._scheduler, lane)
+                _fallback_candidate_admitted.set(True)
         else:
             lease = await self._scheduler.acquire(lane)
         try:
@@ -542,11 +558,13 @@ def fallback_candidate_admission(
 ):
     """Make wrapped leaves report busy lanes to the fallback selector."""
     token = _fallback_candidate_context.set(True)
+    admitted_token = _fallback_candidate_admitted.set(False)
     callback_token = _fallback_admitted_callback.set(on_admitted)
     try:
         yield
     finally:
         _fallback_admitted_callback.reset(callback_token)
+        _fallback_candidate_admitted.reset(admitted_token)
         _fallback_candidate_context.reset(token)
 
 
