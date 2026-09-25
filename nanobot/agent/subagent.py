@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 from loguru import logger
 
 from nanobot.agent.hook import AgentHook, AgentHookContext
-from nanobot.agent.runner import AgentRunner, AgentRunSpec
+from nanobot.agent.runner import AgentRunner
 from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.context import (
     RequestContext,
@@ -34,6 +34,8 @@ from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import AgentDefaults, ToolsConfig
 from nanobot.llm_usage.context import LLMUsageSource, current_llm_usage_source
+from nanobot.orchestration.executor import RunExecutor
+from nanobot.orchestration.types import Budget, Capabilities, RunSpec
 from nanobot.providers.base import LLMProvider, LLMUsage
 from nanobot.security.workspace_access import (
     WorkspaceScope,
@@ -463,11 +465,11 @@ class SubagentManager:
                     if self.memory is not None and consolidate_history is not None
                     else None
                 )
-                result = await self.runner.run(AgentRunSpec(
+                result = await RunExecutor.run(self.runner, RunSpec(
                     initial_messages=messages,
                     tools=tools,
                     runtime=runtime,
-                    max_iterations=self.max_iterations,
+                    budget=Budget(iterations=self.max_iterations),
                     max_tool_result_chars=self.max_tool_result_chars,
                     hook=_SubagentHook(task_id, status),
                     max_iterations_message="Task completed but no final response was generated.",
@@ -482,6 +484,11 @@ class SubagentManager:
                     ),
                     consolidate_history=consolidate_history,
                     consolidate_provider_compaction=consolidate_provider_compaction,
+                    profile="general",
+                    task=task,
+                    caps=Capabilities(tools=frozenset(tools.tool_names)),
+                    context="fresh",
+                    durable=origin.get("session_persist", True),
                 ))
             finally:
                 if token is not None:

@@ -95,13 +95,14 @@ phases:
 
   - id: P01
     title: Single executor
-    status: todo
+    status: in_progress
     depends_on: [P00]
     goal: One code path builds AgentRunSpec for session turns and subagents (I1). Children gain concurrent tools and an injection mailbox.
     create:
       - nanobot/orchestration/__init__.py
       - nanobot/orchestration/types.py        # RunSpec, Capabilities, Budget (fields from §2.1; unused fields may default)
       - nanobot/orchestration/executor.py
+      - tests/orchestration/test_executor.py
     touch:
       - nanobot/agent/loop.py                 # _run_agent_loop delegates spec construction
       - nanobot/agent/subagent.py             # _run_admitted_subagent delegates spec construction
