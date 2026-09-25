@@ -438,6 +438,58 @@ async def test_acquire_any_cancellation_releases_completed_winner(
 
 
 @pytest.mark.asyncio
+async def test_acquire_any_cancellation_before_selector_start_reclaims_child_leases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = Scheduler(default_limit=1)
+    original_create_task = asyncio.create_task
+    created = 0
+    owner: asyncio.Task[Any] | None = None
+
+    def eager_create_task(
+        coroutine: Any,
+        *,
+        name: str | None = None,
+        context: Any = None,
+    ) -> Any:
+        nonlocal created
+        created += 1
+        if created <= 2:
+            try:
+                coroutine.send(None)
+            except StopIteration as complete:
+                future = asyncio.get_running_loop().create_future()
+                future.set_result(complete.value)
+                return future
+            raise AssertionError("lane acquisition should complete without yielding")
+
+        task = original_create_task(coroutine, name=name, context=context)
+        task.cancel()
+        assert owner is not None
+        owner.cancel()
+        return task
+
+    async def reserve() -> None:
+        nonlocal owner
+        owner = asyncio.current_task()
+        monkeypatch.setattr(scheduler_module.asyncio, "create_task", eager_create_task)
+        await scheduler.acquire_any([
+            ProviderLane("provider", "first"),
+            ProviderLane("provider", "second"),
+        ])
+
+    owner = original_create_task(reserve())
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+
+    for model in ("first", "second"):
+        lane = ProviderLane("provider", model)
+        assert scheduler._lane(lane).in_flight == 0
+        lease = await asyncio.wait_for(scheduler.acquire(lane), timeout=0.1)
+        await lease.release()
+
+
+@pytest.mark.asyncio
 async def test_scheduled_retry_paths_preserve_local_saturation_for_fallback() -> None:
     scheduler = Scheduler(default_limit=1)
     primary_leaf = ScriptedProvider({}, route=lambda _messages: "unused", default_model="primary")

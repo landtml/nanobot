@@ -200,13 +200,19 @@ class Scheduler:
             return await asyncio.shield(selector)
         except asyncio.CancelledError:
             selector.cancel()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             try:
                 await asyncio.shield(selector)
             except BaseException:
                 pass
-            if selector.done() and not selector.cancelled():
+            for task in tasks:
+                if task.cancelled():
+                    continue
                 try:
-                    selector.result().release_now()
+                    task.result().release_now()
                 except BaseException:
                     pass
             raise

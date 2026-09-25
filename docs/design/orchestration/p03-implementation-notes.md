@@ -35,8 +35,9 @@ fan-out raises it to 0.13 s (18.2%). The equivalent FIFO schedule reaches
 429 storm test admits four requests initially, verifies later first attempts
 run at a reduced lane cap, then checks that all eight requests succeed and the
 cap recovers to four. Separate cancellation tests cover a lease granted as its
-waiter is cancelled and an `acquire_any` winner granted as its caller is
-cancelled. A raw-versus-scheduled concurrency test confirms default config
+waiter is cancelled, an `acquire_any` winner granted as its caller is cancelled,
+and caller cancellation before the selector starts after child acquisitions have
+already completed. A raw-versus-scheduled concurrency test confirms default config
 admits all 12 calls in both cases. The legacy parity test also confirms that
 `NANOBOT_MAX_CONCURRENT_REQUESTS=2` caps the whole-turn gate while mapping a
 per-lane limit of 2.
