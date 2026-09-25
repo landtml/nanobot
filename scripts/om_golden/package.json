@@ -1,0 +1,10 @@
+{
+  "name": "om-golden",
+  "private": true,
+  "type": "module",
+  "description": "Records golden outputs from Mastra Observational Memory 1.1.0 for nanobot's Python port.",
+  "dependencies": {
+    "js-tiktoken": "1.0.21",
+    "xxhash-wasm": "1.1.0"
+  }
+}

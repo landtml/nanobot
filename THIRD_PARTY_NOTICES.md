@@ -9,6 +9,36 @@ written source offer, and relinking instructions; those target-specific notices 
 
 ---
 
+## Mastra Observational Memory — memory prompts and algorithms (Apache-2.0)
+
+- **Source**: https://github.com/mastra-ai/mastra, `@mastra/memory@1.1.0`
+  (commit `dc7ea1815113584cc156d7a1939a49719d14ca80`),
+  `packages/memory/src/processors/observational-memory/`
+- **Bundled**: `nanobot/agent/observational_memory/` (a Python port; the Observer
+  and Reflector prompts in `prompts.py` are reproduced verbatim)
+
+```
+Copyright (c) 2025 Kepler Software, Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+Changes from the original: translated from TypeScript to Python and adapted to
+nanobot's sessions, providers and storage, as described in
+`nanobot/agent/observational_memory/engine.py`.
+
+---
+
 ## Tabler Icons — interface icons (MIT)
 
 - **Source**: https://github.com/tabler/tabler-icons
