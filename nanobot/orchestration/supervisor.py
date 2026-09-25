@@ -187,7 +187,12 @@ class RunRegistry:
         self._close_admission_tree(run_id)
         count = await self._cancel_descendants(run_id)
         if record.state not in ("completed", "failed", "cancelled"):
-            if record.task is not None and not record.task.done():
+            current_task = asyncio.current_task()
+            if (
+                record.task is not None
+                and record.task is not current_task
+                and not record.task.done()
+            ):
                 record.task.cancel()
                 count += 1
                 await asyncio.gather(record.task, return_exceptions=True)
@@ -270,7 +275,12 @@ class RunRegistry:
             child = self.get(child_id)
             count += await self._cancel_descendants(child_id)
             if child.state not in ("completed", "failed", "cancelled"):
-                if child.task is not None and not child.task.done():
+                current_task = asyncio.current_task()
+                if (
+                    child.task is not None
+                    and child.task is not current_task
+                    and not child.task.done()
+                ):
                     child.task.cancel()
                     count += 1
                     await asyncio.gather(child.task, return_exceptions=True)

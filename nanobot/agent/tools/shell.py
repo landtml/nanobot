@@ -24,8 +24,8 @@ from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import (
     RequestContext,
     ToolContext,
+    current_exec_session_owner,
     current_request_context,
-    current_request_session_key,
 )
 from nanobot.agent.tools.exec_session import (
     DEFAULT_EXEC_SESSION_MANAGER,
@@ -383,7 +383,7 @@ class ExecTool(Tool):
                 shell_program=prepared.shell_program,
                 login=prepared.login,
                 yield_time_ms=clamp_session_int(yield_time_ms, DEFAULT_YIELD_MS, 0, MAX_YIELD_MS),
-                owner_session_key=current_request_session_key(),
+                owner_session_key=current_exec_session_owner(),
                 private_isolated=(
                     request_context is not None and not request_context.session_persist
                 ),

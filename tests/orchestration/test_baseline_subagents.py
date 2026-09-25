@@ -22,7 +22,7 @@ from nanobot.agent.context import TranscriptInput
 from nanobot.agent.loop import AgentLoop
 from nanobot.agent.runner import AgentRunResult, AgentRunSpec
 from nanobot.agent.tools.context import current_request_context
-from nanobot.bus.events import InboundMessage
+from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.command.router import CommandContext
 from nanobot.config.schema import Config, ToolsConfig
@@ -291,6 +291,115 @@ async def test_failed_session_dispatch_emits_failed_turn_state(tmp_path: Path) -
 
     assert len(turns) == 1
     assert turns[0].state == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direct", [False, True], ids=["queued", "direct"])
+async def test_provider_error_response_marks_turn_failed(tmp_path: Path, direct: bool) -> None:
+    provider = ScriptedProvider(
+        {"parent": [LLMResponse(content="provider error", finish_reason="error")]},
+        route=_route_request,
+    )
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        model="test-model",
+        tools_config=_resolved_tools_config(),
+    )
+    try:
+        if direct:
+            await loop.process_direct("cause provider error", session_key="cli:failure")
+        else:
+            await run_session(
+                loop,
+                InboundMessage(
+                    channel="cli",
+                    sender_id="user",
+                    chat_id="failure",
+                    content="cause provider error",
+                ),
+            )
+        root_id = loop.run_registry.session_root_id("cli:failure")
+        assert root_id is not None
+        turns = [
+            record
+            for record in loop.run_registry._runs.values()
+            if record.parent_id == root_id
+        ]
+        assert len(turns) == 1
+        assert turns[0].state == "failed"
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_new_from_process_direct_does_not_cancel_its_caller(tmp_path: Path) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider({}, route=_route_request),
+        workspace=tmp_path,
+        model="test-model",
+        tools_config=_resolved_tools_config(),
+    )
+    try:
+        response = await asyncio.wait_for(
+            loop.process_direct("/new", session_key="cli:direct"),
+            timeout=2,
+        )
+        assert response is not None
+        assert "new session started" in response.content.lower()
+        await asyncio.sleep(0)
+        assert "cli:direct" not in loop._active_tasks
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stop_snapshots_old_direct_tasks_before_waiting_for_cancellation(
+    tmp_path: Path,
+) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider({}, route=_route_request),
+        workspace=tmp_path,
+        model="test-model",
+        tools_config=_resolved_tools_config(),
+    )
+    old_started = asyncio.Event()
+    old_cancelled = asyncio.Event()
+    release_old = asyncio.Event()
+
+    async def process(msg: InboundMessage, **_kwargs: Any) -> OutboundMessage:
+        if msg.content == "old":
+            old_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                old_cancelled.set()
+                await release_old.wait()
+                raise
+        return OutboundMessage(channel="cli", chat_id="direct", content=msg.content)
+
+    loop._process_message = process
+    old_task = asyncio.create_task(loop.process_direct("old", session_key="cli:direct"))
+    await asyncio.wait_for(old_started.wait(), timeout=1)
+    stop_task = asyncio.create_task(loop._cancel_active_tasks("cli:direct"))
+    await asyncio.wait_for(old_cancelled.wait(), timeout=1)
+    new_task = asyncio.create_task(loop.process_direct("new", session_key="cli:direct"))
+    try:
+        await asyncio.sleep(0)
+        release_old.set()
+        await asyncio.wait_for(stop_task, timeout=1)
+        response = await asyncio.wait_for(new_task, timeout=1)
+        assert response is not None and response.content == "new"
+    finally:
+        release_old.set()
+        for task in (old_task, stop_task, new_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(old_task, stop_task, new_task, return_exceptions=True)
+        await loop.aclose()
 
 
 @pytest.mark.asyncio

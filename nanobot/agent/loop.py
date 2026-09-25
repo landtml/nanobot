@@ -754,9 +754,6 @@ class AgentLoop:
             chat_id=ctx.delivery.route.chat_id,
             message_id=ctx.msg.metadata.get("message_id"),
             session_key=ctx.session_key,
-            exec_session_owner_key=(
-                f"run:{run_id}" if (run_id := current_run_id()) is not None else ctx.session_key
-            ),
             original_user_text=ctx.original_user_text,
             runtime=ctx.runtime,
             metadata=dict(ctx.msg.metadata or {}),
@@ -842,9 +839,6 @@ class AgentLoop:
                 chat_id=ctx.msg.chat_id,
                 message_id=metadata.get("message_id"),
                 session_key=ctx.key,
-                exec_session_owner_key=(
-                    f"run:{run_id}" if (run_id := current_run_id()) is not None else ctx.key
-                ),
                 original_user_text=f"!{ctx.args.strip()}",
                 runtime=ctx.runtime,
                 metadata=metadata,
@@ -911,6 +905,12 @@ class AgentLoop:
         if not tasks and self._active_tasks.get(key) is tasks:
             self._active_tasks.pop(key, None)
 
+    def _untrack_active_task(self, key: str, task: asyncio.Task[Any]) -> None:
+        active_tasks = getattr(self, "_active_tasks", {})
+        tasks = active_tasks.get(key)
+        if tasks is not None:
+            self._active_task_done(key, tasks, task)
+
     async def _cancel_active_tasks(self, key: str) -> int:
         """Cancel and await all active work for *key*.
 
@@ -930,15 +930,21 @@ class AgentLoop:
             else ()
         )
         root_id = self.run_registry.session_root_id(key)
+        pending = self._pending_queues.get(key)
+        tasks = tuple(self._active_tasks.pop(key, set()))
+        current_task = asyncio.current_task()
+        cancelled = sum(
+            1 for task in tasks
+            if task is not current_task and not task.done() and task.cancel()
+        )
         tree_cancelled = (
             await self.run_registry.cancel_session(root_id)
             if root_id is not None
             else 0
         )
-        pending = self._pending_queues.get(key)
-        tasks = tuple(self._active_tasks.pop(key, set()))
-        cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
         for t in tasks:
+            if t is current_task:
+                continue
             with suppress(asyncio.CancelledError, Exception):
                 await t
         if tasks and pending is not None and self._pending_queues.get(key) is pending:
@@ -1627,6 +1633,8 @@ class AgentLoop:
                         pending_queue=pending,
                         delivery=delivery,
                     )
+                    if delivery.stop_reason in {"error", "tool_error"}:
+                        succeeded = False
                     continuing = turn_continuation.internal_continuation_pending(msg.metadata)
                     await delivery.complete(
                         response,
@@ -2611,8 +2619,13 @@ class AgentLoop:
                 if attributes is not None:
                     kwargs["attributes"] = dict(attributes)
                 turn_id, run_token = await self._begin_run_turn(session_key)
+                delivery = self.turn_delivery_factory.create(msg, session_key)
                 try:
-                    response = await self._process_message(msg, **kwargs)
+                    response = await self._process_message(
+                        msg,
+                        delivery=delivery,
+                        **kwargs,
+                    )
                 except asyncio.CancelledError:
                     await self.run_registry.finish_cancelled(turn_id)
                     raise
@@ -2620,13 +2633,19 @@ class AgentLoop:
                     await self.run_registry.finish(turn_id, "failed")
                     raise
                 else:
-                    await self.run_registry.finish(turn_id, "completed")
+                    await self.run_registry.finish(
+                        turn_id,
+                        "failed" if delivery.stop_reason in {"error", "tool_error"}
+                        else "completed",
+                    )
                     return response
                 finally:
                     reset_current_run(run_token)
         finally:
             await self.runtime_event_publisher.run_status_changed(msg, session_key, "idle")
             self.runtime_event_publisher.clear_turn(session_key)
+            if task is not None:
+                self._untrack_active_task(session_key, task)
 
     def _get_session_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared lock while allowing idle session entries to expire."""
