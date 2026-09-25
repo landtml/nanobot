@@ -437,6 +437,7 @@ class AgentLoop:
             memory=self.memory,
             supervisor=self.run_registry,
         )
+        self.run_registry.add_terminal_cleanup(self._cleanup_run_exec_sessions)
         self._unified_session = unified_session
         self._running = False
         self._runtime_context_providers: list[RuntimeContextProvider] = []
@@ -753,6 +754,9 @@ class AgentLoop:
             chat_id=ctx.delivery.route.chat_id,
             message_id=ctx.msg.metadata.get("message_id"),
             session_key=ctx.session_key,
+            exec_session_owner_key=(
+                f"run:{run_id}" if (run_id := current_run_id()) is not None else ctx.session_key
+            ),
             original_user_text=ctx.original_user_text,
             runtime=ctx.runtime,
             metadata=dict(ctx.msg.metadata or {}),
@@ -838,6 +842,9 @@ class AgentLoop:
                 chat_id=ctx.msg.chat_id,
                 message_id=metadata.get("message_id"),
                 session_key=ctx.key,
+                exec_session_owner_key=(
+                    f"run:{run_id}" if (run_id := current_run_id()) is not None else ctx.key
+                ),
                 original_user_text=f"!{ctx.args.strip()}",
                 runtime=ctx.runtime,
                 metadata=metadata,
@@ -870,7 +877,10 @@ class AgentLoop:
 
     def _track_active_task(self, key: str, task: asyncio.Task[Any]) -> None:
         """Track active session work until its task group becomes empty."""
-        tasks = self._active_tasks.setdefault(key, set())
+        active_tasks = getattr(self, "_active_tasks", None)
+        if active_tasks is None:
+            active_tasks = self._active_tasks = {}
+        tasks = active_tasks.setdefault(key, set())
         tasks.add(task)
         task.add_done_callback(partial(self._active_task_done, key, tasks))
 
@@ -885,6 +895,9 @@ class AgentLoop:
             parent_id=root.id,
             root_id=root.id,
         )
+        task = asyncio.current_task()
+        if task is not None:
+            run_registry.attach_task(turn_id, task)
         await run_registry.start(turn_id)
         return turn_id, bind_current_run(turn_id)
 
@@ -943,6 +956,11 @@ class AgentLoop:
         sub_cancelled = await self.subagents.cancel_by_session(key)
         exec_cancelled = await self._exec_session_manager.terminate_by_owner(key)
         return cancelled + tree_cancelled + sub_cancelled + exec_cancelled
+
+    async def _cleanup_run_exec_sessions(self, run_id: str) -> None:
+        owner = f"run:{run_id}"
+        for manager in (self._exec_session_manager, self.subagents._exec_session_manager):
+            await manager.terminate_by_owner(owner)
 
     async def discard_session(self, key: str) -> None:
         """Stop active work for *key* and forget its cached session."""
@@ -1505,7 +1523,7 @@ class AgentLoop:
                 try:
                     turn_id, run_token = await self._begin_run_turn(session_key)
                     try:
-                        await self._dispatch_one(msg, pending)
+                        dispatched = await self._dispatch_one(msg, pending)
                     except asyncio.CancelledError:
                         await self.run_registry.finish_cancelled(turn_id)
                         raise
@@ -1513,7 +1531,10 @@ class AgentLoop:
                         await self.run_registry.finish(turn_id, "failed")
                         raise
                     else:
-                        await self.run_registry.finish(turn_id, "completed")
+                        await self.run_registry.finish(
+                            turn_id,
+                            "failed" if dispatched is False else "completed",
+                        )
                     finally:
                         reset_current_run(run_token)
                 except asyncio.CancelledError as exc:
@@ -1557,7 +1578,7 @@ class AgentLoop:
         self,
         msg: InboundMessage,
         pending: asyncio.Queue[InboundMessage],
-    ) -> None:
+    ) -> bool | None:
         """Process one root message while later inputs remain in its session inbox."""
         session_key = self._effective_session_key(msg)
         # The request context is reset before errors reach this boundary, and
@@ -1586,6 +1607,7 @@ class AgentLoop:
 
         delivery = self.turn_delivery_factory.unrouted(msg, session_key)
         completion_published = False
+        succeeded = True
         try:
             async with lock, gate:
                 # A preceding user turn may have completed or blocked the goal
@@ -1648,6 +1670,7 @@ class AgentLoop:
                         )
                     raise
                 except Exception as exc:
+                    succeeded = False
                     logger.opt(exception=log_content).error(
                         "Error processing message for session {}", session_key,
                     )
@@ -1672,6 +1695,7 @@ class AgentLoop:
                 and recovery_admission is not None
             ):
                 recovery_admission.unregister_recovery_task(session_key, current_task)
+        return succeeded
 
     async def aclose(self) -> None:
         """Stop active work, then close resources owned by the agent loop.
@@ -2551,6 +2575,9 @@ class AgentLoop:
         """Process an external message directly and return the outbound payload."""
         if channel == "system":
             raise ValueError("channel 'system' is reserved for internal messages")
+        task = asyncio.current_task()
+        if task is not None:
+            self._track_active_task(session_key, task)
         metadata: dict[str, Any] = {}
         if not persist_user_message:
             metadata[turn_continuation.SKIP_USER_PERSIST_META] = True

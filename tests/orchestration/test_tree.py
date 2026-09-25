@@ -140,6 +140,74 @@ async def test_concurrent_tree_stops_emit_one_cancellation_event_per_run() -> No
     assert len([event for event in events if type(event).__name__ == "RunCancelled"]) == 2
 
 
+@pytest.mark.asyncio
+async def test_cancellation_closes_admission_before_waiting_for_children() -> None:
+    registry = RunRegistry()
+    root = await registry.ensure_session_root("session")
+    child_started = asyncio.Event()
+    release_child = asyncio.Event()
+
+    async def blocked_child() -> None:
+        child_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release_child.wait()
+            raise
+
+    registry.register("child", parent_id=root.id, root_id=root.id)
+    await registry.start("child")
+    child_task = asyncio.create_task(blocked_child())
+    registry.attach_task("child", child_task)
+    await child_started.wait()
+    stop_task = asyncio.create_task(registry.cancel_session(root.id))
+    await asyncio.sleep(0)
+
+    with pytest.raises(ValueError, match="admission is closed"):
+        registry.register("late-child", parent_id=root.id, root_id=root.id)
+
+    release_child.set()
+    await stop_task
+
+
+@pytest.mark.asyncio
+async def test_terminal_runs_drop_task_status_and_child_references() -> None:
+    registry = RunRegistry()
+    registry.register("root", parent_id=None, root_id="root")
+    registry.register(
+        "turn",
+        parent_id="root",
+        root_id="root",
+        legacy_status={"task_id": "turn", "phase": "running"},
+    )
+    child_task = asyncio.create_task(asyncio.sleep(0))
+    await child_task
+    registry.attach_task("turn", child_task)
+
+    await registry.finish("turn", "completed")
+
+    record = registry.get("turn")
+    assert record.task is None
+    assert record.legacy_status is None
+    assert "turn" not in registry._children.get("root", set())
+    assert "turn" not in registry._children
+    assert child_task.done()
+
+
+@pytest.mark.asyncio
+async def test_terminal_run_history_is_bounded() -> None:
+    registry = RunRegistry(max_terminal_records=8)
+    registry.register("root", parent_id=None, root_id="root")
+    for index in range(12):
+        run_id = f"turn-{index}"
+        registry.register(run_id, parent_id="root", root_id="root")
+        await registry.finish(run_id, "completed")
+
+    assert not registry.contains("turn-0")
+    assert registry.contains("turn-11")
+    assert len(registry.terminal_ids()) == 8
+
+
 def test_snapshot_keeps_legacy_subagent_status_shape() -> None:
     registry = RunRegistry()
     registry.register("session-1", parent_id=None, root_id="session-1")

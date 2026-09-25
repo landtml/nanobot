@@ -175,9 +175,13 @@ class SubagentManager:
         self._run_slots = asyncio.Semaphore(self.max_concurrent_subagents)
         self.runner = AgentRunner()
         self._exec_session_manager = ExecSessionManager()
+        self.supervisor.add_terminal_cleanup(self._cleanup_run_exec_sessions)
         self._running_tasks: dict[str, asyncio.Task[str]] = {}
         self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
+
+    async def _cleanup_run_exec_sessions(self, run_id: str) -> None:
+        await self._exec_session_manager.terminate_by_owner(f"run:{run_id}")
 
     def runtime_statuses(self) -> Mapping[str, SubagentStatus]:
         """Return the observable task statuses used by runtime-control snapshots."""
@@ -538,6 +542,7 @@ class SubagentManager:
                 chat_id=origin["chat_id"],
                 message_id=origin_message_id,
                 session_key=sess_key,
+                exec_session_owner_key=f"run:{task_id}",
                 runtime=runtime,
                 log_content=origin.get("log_content", True),
                 session_persist=origin.get("session_persist", True),

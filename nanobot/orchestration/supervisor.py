@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from nanobot.events import AgentEvent
 RunState = Literal["queued", "running", "completed", "failed", "cancelled"]
 RunLifetime = Literal["scoped", "detached"]
 LifecyclePublisher = Callable[[AgentEvent], Awaitable[None]]
+TerminalCleanup = Callable[[str], Awaitable[None]]
 _CURRENT_RUN_ID: ContextVar[str | None] = ContextVar("nanobot_current_run_id", default=None)
 
 
@@ -62,16 +64,28 @@ class RunRecord:
     task: asyncio.Task[object] | None = field(default=None, repr=False)
     legacy_status: object | None = None
     legacy_snapshot: Mapping[str, object] | None = None
+    accepting_children: bool = True
 
 
 class RunRegistry:
     """Own run identities, lifecycle state, task ownership, and cancellation."""
 
-    def __init__(self, publish: LifecyclePublisher | None = None) -> None:
+    def __init__(
+        self,
+        publish: LifecyclePublisher | None = None,
+        *,
+        max_terminal_records: int = 256,
+    ) -> None:
         self._runs: dict[str, RunRecord] = {}
         self._children: dict[str, set[str]] = {}
         self._session_roots: dict[str, str] = {}
         self._publish = publish
+        self._terminal_cleanups: list[TerminalCleanup] = []
+        self._terminal_order: deque[str] = deque()
+        self._max_terminal_records = max_terminal_records
+
+    def add_terminal_cleanup(self, cleanup: TerminalCleanup) -> None:
+        self._terminal_cleanups.append(cleanup)
 
     async def ensure_session_root(self, session_key: str) -> RunRecord:
         """Return the active generation root for a session, creating it if needed."""
@@ -101,6 +115,10 @@ class RunRegistry:
             raise ValueError(f"run {run_id!r} is already registered")
         if parent_id is not None and parent_id not in self._runs:
             raise KeyError(f"parent run {parent_id!r} is not registered")
+        if parent_id is not None:
+            parent = self.get(parent_id)
+            if parent.state in ("completed", "failed", "cancelled") or not parent.accepting_children:
+                raise ValueError(f"parent run {parent_id!r} admission is closed")
         record = RunRecord(
             id=run_id,
             root_id=root_id,
@@ -137,26 +155,36 @@ class RunRegistry:
         if record.task is not None:
             raise ValueError(f"run {run_id!r} already owns a task")
         record.task = task
+        task.add_done_callback(lambda done: self.detach_task(run_id, done))
+
+    def detach_task(self, run_id: str, task: asyncio.Task[object]) -> None:
+        record = self._runs.get(run_id)
+        if record is not None and record.task is task:
+            record.task = None
 
     async def finish(self, run_id: str, state: Literal["completed", "failed"]) -> None:
         record = self.get(run_id)
         if record.state in ("completed", "failed", "cancelled"):
             return
+        record.accepting_children = False
         await self._cancel_scoped_children(run_id)
         record.state = state
         await self._emit(RunCompleted(run_id=run_id, root_id=record.root_id, state=state))
+        await self._terminalize(record)
 
     async def finish_cancelled(self, run_id: str) -> None:
         """Record cancellation once after a task observes CancelledError."""
         record = self.get(run_id)
         if record.state in ("completed", "failed", "cancelled"):
             return
+        record.accepting_children = False
         await self._cancel_scoped_children(run_id)
         await self._mark_cancelled(record)
 
     async def cancel_tree(self, run_id: str) -> int:
         """Cancel descendants depth-first, then the requested run."""
         record = self.get(run_id)
+        self._close_admission_tree(run_id)
         count = await self._cancel_descendants(run_id)
         if record.state not in ("completed", "failed", "cancelled"):
             if record.task is not None and not record.task.done():
@@ -170,10 +198,11 @@ class RunRegistry:
         """End one session generation and cancel its whole run tree."""
         if root_id not in self._runs:
             return 0
-        count = await self.cancel_tree(root_id)
+        self._close_admission_tree(root_id)
         for session_key, candidate in tuple(self._session_roots.items()):
             if candidate == root_id:
                 del self._session_roots[session_key]
+        count = await self.cancel_tree(root_id)
         return count
 
     async def cancel_all(self) -> int:
@@ -214,6 +243,17 @@ class RunRegistry:
             and (root_id is None or record.root_id == root_id)
         )
 
+    def terminal_ids(self) -> tuple[str, ...]:
+        return tuple(self._terminal_order)
+
+    def _close_admission_tree(self, run_id: str) -> None:
+        record = self._runs.get(run_id)
+        if record is None:
+            return
+        record.accepting_children = False
+        for child_id in tuple(self._children.get(run_id, ())):
+            self._close_admission_tree(child_id)
+
     async def _cancel_scoped_children(self, run_id: str) -> int:
         count = 0
         for child_id in tuple(self._children.get(run_id, ())):
@@ -242,6 +282,24 @@ class RunRegistry:
             return
         record.state = "cancelled"
         await self._emit(RunCancelled(run_id=record.id, root_id=record.root_id))
+        await self._terminalize(record)
+
+    async def _terminalize(self, record: RunRecord) -> None:
+        for cleanup in self._terminal_cleanups:
+            try:
+                await cleanup(record.id)
+            except Exception:
+                logger.exception("Failed terminal cleanup for run {}", record.id)
+        record.task = None
+        record.legacy_status = None
+        record.legacy_snapshot = None
+        self._children.pop(record.id, None)
+        if record.parent_id is not None and record.parent_id in self._children:
+            self._children[record.parent_id].discard(record.id)
+        self._terminal_order.append(record.id)
+        while len(self._terminal_order) > self._max_terminal_records:
+            expired = self._terminal_order.popleft()
+            self._runs.pop(expired, None)
 
     async def _emit(self, event: AgentEvent) -> None:
         if self._publish is not None:

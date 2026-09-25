@@ -197,6 +197,103 @@ async def test_stop_cancels_a_child_and_records_latency(
 
 
 @pytest.mark.asyncio
+async def test_stop_cancels_an_active_process_direct_turn(tmp_path: Path) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider({}, route=_route_request),
+        workspace=tmp_path,
+        model="test-model",
+        tools_config=_resolved_tools_config(),
+    )
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    continued_after_cancel = False
+
+    async def blocked_process(*_args: object, **_kwargs: object) -> None:
+        nonlocal continued_after_cancel
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        continued_after_cancel = True
+
+    loop._process_message = blocked_process
+    session_key = "cli:direct-stop"
+    direct_task = asyncio.create_task(
+        loop.process_direct("blocked", session_key=session_key)
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        assert direct_task in loop._active_tasks[session_key]
+        message = InboundMessage(
+            channel="cli",
+            sender_id="user",
+            chat_id="direct-stop",
+            content="/stop",
+        )
+        context = CommandContext(
+            msg=message,
+            session=loop.sessions.get_or_create(session_key),
+            key=session_key,
+            raw="/stop",
+            loop=loop,
+        )
+
+        await loop.commands.dispatch_priority(context)
+        await asyncio.gather(direct_task, return_exceptions=True)
+    finally:
+        if not direct_task.done():
+            direct_task.cancel()
+            await asyncio.gather(direct_task, return_exceptions=True)
+        await loop.aclose()
+
+    assert cancelled.is_set()
+    assert not continued_after_cancel
+    assert loop.run_registry.live_tasks() == ()
+
+
+@pytest.mark.asyncio
+async def test_failed_session_dispatch_emits_failed_turn_state(tmp_path: Path) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider({}, route=_route_request),
+        workspace=tmp_path,
+        model="test-model",
+        tools_config=_resolved_tools_config(),
+    )
+
+    async def fail_process(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("simulated turn failure")
+
+    loop._process_message = fail_process
+    session_key = "cli:failed-turn"
+    try:
+        await run_session(
+            loop,
+            InboundMessage(
+                channel="cli",
+                sender_id="user",
+                chat_id="failed-turn",
+                content="fail this turn",
+            ),
+        )
+        root_id = loop.run_registry.session_root_id(session_key)
+        assert root_id is not None
+        turns = [
+            record
+            for record in loop.run_registry._runs.values()
+            if record.parent_id == root_id
+        ]
+    finally:
+        await loop.aclose()
+
+    assert len(turns) == 1
+    assert turns[0].state == "failed"
+
+
+@pytest.mark.asyncio
 async def test_private_parent_child_cannot_read_observations_or_log_task_label(
     tmp_path: Path,
 ) -> None:
