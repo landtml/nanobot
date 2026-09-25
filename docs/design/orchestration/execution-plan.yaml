@@ -72,7 +72,7 @@ phases:
       - nanobot/agent/tools/filesystem.py     # deny private reads of observations.md
       - nanobot/agent/tools/search.py         # keep private grep from returning observations.md
       - nanobot/agent/tools/base.py           # per-request tool availability contract
-      - nanobot/agent/tools/registry.py       # filter unavailable tools and reject direct calls
+      - nanobot/agent/tools/registry.py       # filter unavailable tools, names, and direct calls
       - nanobot/agent/tools/shell.py          # enforce private process isolation at launch
       - nanobot/agent/tools/exec_session.py   # apply private-session tool availability
       - nanobot/agent/tools/sandbox.py        # probe native isolation and mask protected paths
@@ -83,12 +83,15 @@ phases:
       - "Privacy fix: read the active session's policy (SessionPolicy.persist) at call time via request context; keep the allowance for durable sessions."
       - "I5 shell boundary: use bubblewrap or Seatbelt to mask observations.md for private exec launches; hide exec, exec_session, and list_exec_sessions and reject direct calls when a native isolation probe fails."
       - "Managed shell sessions carry their isolation provenance; private callers cannot inspect or control a session started without private isolation, even when a session key is reused."
+      - "Private launches use a trusted non-login system shell; custom shells and login startup files are refused, and path overrides run inside the OS sandbox so they cannot replace its launcher."
+      - "Runtime tool-name reporting follows the same per-request availability policy as the model-facing tool schema."
     done_when:
       - Baseline tests pass on the unchanged code.
       - Simulator can run a parent turn with 3 children in < 1 s wall time.
       - Test proves a private session's read_file of memory/observations.md is refused; durable sessions still read it.
-      - Tests prove immediate and managed private exec cannot read memory/observations.md; without supported isolation, shell tools are withheld and direct exec fails closed.
+      - Tests prove immediate and managed private exec cannot read memory/observations.md while a control command succeeds; without supported isolation, shell tools are withheld and direct exec fails closed.
       - Test proves a private session cannot inspect or control a pre-existing managed shell process that was started without private isolation.
+      - Tests prove custom shells, login startup files, and path_prepend cannot execute before private isolation; unavailable shell tools are omitted from runtime capability names.
 
   - id: P01
     title: Single executor

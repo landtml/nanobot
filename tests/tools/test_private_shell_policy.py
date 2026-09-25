@@ -157,6 +157,118 @@ async def test_private_session_cannot_access_an_unisolated_prior_shell(tmp_path)
     assert session_id not in listed
 
 
+def test_registry_tool_names_respect_private_availability(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox, "private_session_sandbox_backend", lambda: None)
+    registry = _make_registry(tmp_path)
+
+    assert _SHELL_TOOLS.issubset(registry.tool_names)
+
+    with request_context(RequestContext(
+        channel="websocket",
+        chat_id="private",
+        session_key="websocket:private",
+        session_persist=False,
+    )):
+        names = registry.tool_names
+
+    assert _SHELL_TOOLS.isdisjoint(names)
+
+
+@pytest.mark.asyncio
+async def test_private_exec_rejects_custom_shell_before_process_start(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox, "private_session_sandbox_backend", lambda: "bwrap")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    observations = workspace / "memory" / "observations.md"
+    observations.parent.mkdir()
+    observations.write_text("private memory marker", encoding="utf-8")
+    custom_shell = workspace / "bash"
+    host_marker = tmp_path / "custom-shell-ran"
+    custom_shell.write_text(
+        "#!/bin/sh\n"
+        f"cat {shlex.quote(str(observations))} > {shlex.quote(str(host_marker))}\n",
+        encoding="utf-8",
+    )
+    custom_shell.chmod(0o755)
+    tool = ExecTool(working_dir=str(workspace), timeout=5)
+
+    with request_context(RequestContext(
+        channel="websocket",
+        chat_id="private",
+        session_key="websocket:private",
+        workspace=workspace,
+        session_persist=False,
+    )):
+        result = await tool.execute(command="true", shell=str(custom_shell))
+
+    assert is_tool_error_result(result)
+    assert "custom shell" in result
+    assert not host_marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_private_exec_rejects_login_shell_before_startup_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox, "private_session_sandbox_backend", lambda: "bwrap")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    host_marker = tmp_path / "login-profile-ran"
+    (fake_home / ".bash_profile").write_text(
+        f"touch {shlex.quote(str(host_marker))}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(fake_home))
+    tool = ExecTool(working_dir=str(workspace), timeout=5)
+
+    with request_context(RequestContext(
+        channel="websocket",
+        chat_id="private",
+        session_key="websocket:private",
+        workspace=workspace,
+        session_persist=False,
+    )):
+        result = await tool.execute(command="true", login=True)
+
+    assert not host_marker.exists()
+    assert is_tool_error_result(result)
+    assert "login shells" in result
+
+
+@pytest.mark.asyncio
+async def test_private_exec_does_not_resolve_sandbox_from_path_prepend(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox, "private_session_sandbox_backend", lambda: "bwrap")
+    workspace = tmp_path / "workspace"
+    fake_bin = workspace / "bin"
+    fake_bin.mkdir(parents=True)
+    host_marker = tmp_path / "fake-bwrap-ran"
+    fake_bwrap = fake_bin / "bwrap"
+    fake_bwrap.write_text(
+        "#!/bin/sh\n"
+        f"touch {shlex.quote(str(host_marker))}\n",
+        encoding="utf-8",
+    )
+    fake_bwrap.chmod(0o755)
+    tool = ExecTool(
+        working_dir=str(workspace),
+        timeout=5,
+        path_prepend=str(fake_bin),
+    )
+
+    with request_context(RequestContext(
+        channel="websocket",
+        chat_id="private",
+        session_key="websocket:private",
+        workspace=workspace,
+        session_persist=False,
+    )):
+        result = await tool.execute(command="printf private-shell-ok")
+
+    assert "private-shell-ok" in result
+    assert "Exit code: 0" in result
+    assert not host_marker.exists()
+
+
 @pytest.mark.asyncio
 @pytest.mark.skipif(
     sys.platform != "linux" or shutil.which("bwrap") is None,
@@ -181,10 +293,28 @@ async def test_private_immediate_and_managed_exec_cannot_read_observations(tmp_p
         workspace=workspace,
         session_persist=False,
     )):
-        immediate = await tool.execute(command=f"cat {observations}")
-        managed = await tool.execute(command=f"cat {observations}", yield_time_ms=1000)
+        immediate_control = await tool.execute(command="printf private-shell-ok")
+        managed_control = await tool.execute(
+            command="printf private-shell-ok",
+            yield_time_ms=1000,
+        )
+        immediate = await tool.execute(
+            command=f"grep -F 'private memory marker' {shlex.quote(str(observations))}"
+        )
+        managed = await tool.execute(
+            command=f"grep -F 'private memory marker' {shlex.quote(str(observations))}",
+            yield_time_ms=1000,
+        )
 
     await manager.close_all()
 
+    assert "private-shell-ok" in immediate_control
+    assert "Exit code: 0" in immediate_control
+    assert "private-shell-ok" in managed_control
+    assert "Exit code: 0" in managed_control
     assert "private memory marker" not in immediate
     assert "private memory marker" not in managed
+    assert "Permission denied" in immediate
+    assert "Permission denied" in managed
+    assert "Exit code: 2" in immediate
+    assert "Exit code: 2" in managed

@@ -215,8 +215,15 @@ class ToolRegistry:
 
     @property
     def tool_names(self) -> list[str]:
-        """Get list of registered tool names."""
-        return list(self._tools.keys())
+        """Get registered tool names available to the active request."""
+        request = current_request_context()
+        if request is None:
+            return list(self._tools)
+        return [
+            name
+            for name, tool in self._tools.items()
+            if tool.available_in_context(request)
+        ]
 
     def __len__(self) -> int:
         return len(self._tools)

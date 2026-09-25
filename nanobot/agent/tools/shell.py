@@ -471,6 +471,11 @@ class ExecTool(Tool):
 
         request_context = current_request_context()
         private_session = request_context is not None and not request_context.session_persist
+        if private_session and shell is not None:
+            return ToolResult.error("Error: custom shells are unavailable in private sessions.")
+        if private_session and login:
+            return ToolResult.error("Error: login shells are unavailable in private sessions.")
+
         sandbox_backend = self.sandbox
         denied_read_paths: list[str] = []
         if private_session:
@@ -482,6 +487,14 @@ class ExecTool(Tool):
                 observations_workspace.expanduser() / "memory" / "observations.md"
             ).resolve(strict=False)
             denied_read_paths.append(str(observations_path))
+
+        effective_timeout = self._resolve_timeout(timeout)
+        env = self._build_env()
+        if self.path_prepend or self.path_append:
+            if _IS_WINDOWS:
+                env["PATH"] = self._compose_path(env.get("PATH", ""))
+            elif private_session:
+                command = self._wrap_path_export(command, env)
 
         if sandbox_backend:
             if _IS_WINDOWS:
@@ -508,18 +521,15 @@ class ExecTool(Tool):
                 )
                 cwd = str(Path(workspace).resolve())
 
-        effective_timeout = self._resolve_timeout(timeout)
-        env = self._build_env()
-
         if self.path_prepend or self.path_append:
-            if _IS_WINDOWS:
-                env["PATH"] = self._compose_path(env.get("PATH", ""))
-            else:
+            if not _IS_WINDOWS and not private_session:
                 command = self._wrap_path_export(command, env)
 
         shell_program, shell_error = self._resolve_shell(shell)
         if shell_error:
             return shell_error
+        if private_session:
+            shell_program = "/bin/sh"
 
         return _PreparedCommand(
             command=command,
@@ -527,7 +537,7 @@ class ExecTool(Tool):
             env=env,
             timeout=effective_timeout,
             shell_program=shell_program,
-            login=False if login is None else login,
+            login=False if private_session or login is None else login,
         )
 
     def _compose_path(self, current_path: str) -> str:
