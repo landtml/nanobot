@@ -262,8 +262,17 @@ def test_exec_session_wait_for_searches_before_response_truncation():
             yield_time_ms: int,
             max_output_chars: int,
             owner_session_key: str | None,
+            require_private_isolation: bool,
         ) -> _SessionPoll:
-            del session_id, chars, close_stdin, terminate, yield_time_ms, owner_session_key
+            del (
+                session_id,
+                chars,
+                close_stdin,
+                terminate,
+                yield_time_ms,
+                owner_session_key,
+                require_private_isolation,
+            )
             observed_limits.append(max_output_chars)
             visible, truncated = _truncate_output(output, max_output_chars)
             return _SessionPoll(

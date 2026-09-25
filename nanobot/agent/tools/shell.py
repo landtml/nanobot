@@ -19,8 +19,14 @@ from urllib.parse import unquote
 from loguru import logger
 from pydantic import Field
 
+from nanobot.agent.tools import sandbox
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
-from nanobot.agent.tools.context import ToolContext, current_request_session_key
+from nanobot.agent.tools.context import (
+    RequestContext,
+    ToolContext,
+    current_request_context,
+    current_request_session_key,
+)
 from nanobot.agent.tools.exec_session import (
     DEFAULT_EXEC_SESSION_MANAGER,
     DEFAULT_MAX_OUTPUT_CHARS,
@@ -266,6 +272,13 @@ class ExecTool(Tool):
     def description(self) -> str:
         return "Execute a shell command."
 
+    def available_in_context(self, request: RequestContext | None) -> bool:
+        return (
+            request is None
+            or request.session_persist
+            or sandbox.private_session_sandbox_backend() is not None
+        )
+
     @property
     def exclusive(self) -> bool:
         return True
@@ -360,6 +373,7 @@ class ExecTool(Tool):
         yield_time_ms: int | None,
         max_output_chars: int | None,
     ) -> str:
+        request_context = current_request_context()
         try:
             session_id, poll = await self._session_manager.start(
                 command=prepared.command,
@@ -370,6 +384,9 @@ class ExecTool(Tool):
                 login=prepared.login,
                 yield_time_ms=clamp_session_int(yield_time_ms, DEFAULT_YIELD_MS, 0, MAX_YIELD_MS),
                 owner_session_key=current_request_session_key(),
+                private_isolated=(
+                    request_context is not None and not request_context.session_persist
+                ),
                 max_output_chars=clamp_session_int(
                     max_output_chars,
                     DEFAULT_MAX_OUTPUT_CHARS,
@@ -452,21 +469,42 @@ class ExecTool(Tool):
             if guard_error:
                 return guard_error
 
-        if self.sandbox:
+        request_context = current_request_context()
+        private_session = request_context is not None and not request_context.session_persist
+        sandbox_backend = self.sandbox
+        denied_read_paths: list[str] = []
+        if private_session:
+            sandbox_backend = sandbox.private_session_sandbox_backend()
+            if sandbox_backend is None:
+                return ToolResult.error(sandbox.PRIVATE_SESSION_SHELL_ISOLATION_ERROR)
+            observations_workspace = Path(self.working_dir or workspace_root or cwd)
+            observations_path = (
+                observations_workspace.expanduser() / "memory" / "observations.md"
+            ).resolve(strict=False)
+            denied_read_paths.append(str(observations_path))
+
+        if sandbox_backend:
             if _IS_WINDOWS:
+                if private_session:
+                    return ToolResult.error(sandbox.PRIVATE_SESSION_SHELL_ISOLATION_ERROR)
                 logger.warning(
                     "Sandbox '{}' is not supported on Windows; running unsandboxed",
-                    self.sandbox,
+                    sandbox_backend,
                 )
             else:
                 workspace = workspace_root or cwd
+                sandbox_options = {
+                    "sandbox_ro_binds": [str(p) for p in self.sandbox_ro_binds],
+                    "sandbox_rw_binds": [str(p) for p in self.sandbox_rw_binds],
+                }
+                if denied_read_paths:
+                    sandbox_options["denied_read_paths"] = denied_read_paths
                 command = wrap_command(
-                    self.sandbox,
+                    sandbox_backend,
                     command,
                     workspace,
                     cwd,
-                    sandbox_ro_binds=[str(p) for p in self.sandbox_ro_binds],
-                    sandbox_rw_binds=[str(p) for p in self.sandbox_rw_binds],
+                    **sandbox_options,
                 )
                 cwd = str(Path(workspace).resolve())
 
