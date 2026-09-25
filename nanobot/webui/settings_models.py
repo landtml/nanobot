@@ -838,8 +838,8 @@ def _rename_model_configuration(config: Config, old_name: str, new_name: str) ->
         new_name if fallback == old_name else fallback
         for fallback in defaults.fallback_models
     ]
-    if defaults.dream.model_override == old_name:
-        defaults.dream.model_override = new_name
+    if defaults.memory.model_override == old_name:
+        defaults.memory.model_override = new_name
     return True
 
 

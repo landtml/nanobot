@@ -5,19 +5,18 @@ These commands work inside chat channels and interactive agent sessions:
 | Command | Description |
 |---------|-------------|
 | `/new` | Stop current task and start a new conversation |
-| `/compact` | Summarize the current conversation context while keeping saved chat history |
+| `/compact` | Observe the current conversation now and continue from memory, keeping saved chat history |
 | `/stop` | Stop the current task |
 | `/restart` | Restart the bot |
 | `/status` | Show bot status |
 | `/model` | Show the current model and available model presets |
 | `/model <preset>` | Switch and persist the model preset for the current session |
-| `/dream` | Run Dream memory consolidation now |
-| `/dream-log` | Show the latest Dream memory change |
-| `/dream-log <sha>` | Show a specific Dream memory change |
-| `/dream-restore` | List recent Dream memory versions |
-| `/dream-restore <sha>` | Restore memory to the state before a specific change |
-| `/dream-prompt` | Show how Dream is being guided for memory |
-| `/dream-prompt init` | Create an editable Dream memory guide at `prompts/dream.md` |
+| `/memory` | Show memory status and the most recent observations |
+| `/memory reflect` | Condense the observation log now |
+| `/memory-log` | Show the latest memory change |
+| `/memory-log <sha>` | Show a specific memory change |
+| `/memory-restore` | List recent memory versions |
+| `/memory-restore <sha>` | Restore memory to the state before a specific change |
 | `/skill` | List enabled skills and their descriptions |
 | `/trigger` | Show local trigger usage |
 | `/trigger <name>` | Create a named local trigger for the current chat/session |

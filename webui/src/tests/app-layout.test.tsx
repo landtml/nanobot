@@ -137,8 +137,10 @@ function baseSettingsPayload() {
         enabled: true,
         interval_s: 1800,
       },
-      dream: {
-        schedule: "every 2h",
+      memory: {
+        message_tokens: 30000,
+        observation_tokens: 40000,
+        model_override: null,
       },
       unified_session: false,
     },
@@ -3011,8 +3013,10 @@ describe("App layout", () => {
                   enabled: true,
                   interval_s: 1800,
                 },
-                dream: {
-                  schedule: "every 2h",
+                memory: {
+                  message_tokens: 30000,
+                  observation_tokens: 40000,
+                  model_override: null,
                 },
                 unified_session: false,
               },

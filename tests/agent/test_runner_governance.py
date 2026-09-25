@@ -32,13 +32,27 @@ from nanobot.session.summary import SUMMARY_CONTINUATION_TEXT
 _MAX_TOOL_RESULT_CHARS = AgentDefaults().max_tool_result_chars
 
 
+# Stands in for workspace memory: compaction writes it, and every rebuilt
+# system prompt reads it back, as ContextBuilder does with the observation log.
+_MEMORY = {"text": "system"}
+
+
+@pytest.fixture(autouse=True)
+def _reset_memory():
+    _MEMORY["text"] = "system"
+
+
+def _remembering(summary: str | None) -> AsyncMock:
+    async def consolidate(_messages, _previous):
+        if summary is not None:
+            _MEMORY["text"] = summary
+        return summary
+
+    return AsyncMock(side_effect=consolidate)
+
+
 def _build_transcript(transcript: TranscriptInput) -> list[dict]:
-    system = (
-        transcript.session_summary["text"]
-        if transcript.session_summary is not None
-        else "system"
-    )
-    messages = [{"role": "system", "content": system}, *transcript.history]
+    messages = [{"role": "system", "content": _MEMORY["text"]}, *transcript.history]
     if transcript.current_message is not None:
         messages.append({"role": transcript.current_role, "content": transcript.current_message})
     return messages
@@ -80,6 +94,7 @@ def _make_loop(tmp_path):
 
     with patch("nanobot.agent.loop.ContextBuilder"), \
          patch("nanobot.agent.loop.SessionManager"), \
+         patch("nanobot.agent.loop.Memory", autospec=True), \
          patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
         mock_sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
         loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path)
@@ -175,8 +190,8 @@ async def test_runner_summarizes_history_and_preserves_current_input(monkeypatch
             else (100, "test-counter")
         ),
     )
-    consolidate = AsyncMock(return_value="fresh checkpoint")
-    previous = {"text": "existing checkpoint", "last_active": "2026-08-30T00:00:00"}
+    consolidate = _remembering("fresh checkpoint")
+    _MEMORY["text"] = "existing checkpoint"
 
     result = await AgentRunner().run(make_run_spec(
         provider,
@@ -187,7 +202,6 @@ async def test_runner_summarizes_history_and_preserves_current_input(monkeypatch
                 {"role": "assistant", "content": old_answer},
             ],
             current_message="continue the current task",
-            session_summary=previous,
         ),
         transcript_builder=_build_transcript,
         consolidate_history=consolidate,
@@ -206,7 +220,7 @@ async def test_runner_summarizes_history_and_preserves_current_input(monkeypatch
             {"role": "user", "content": "old question"},
             {"role": "assistant", "content": old_answer},
         ],
-        "existing checkpoint",
+        None,
     )
     assert requests[0][0] == [
         {"role": "system", "content": "fresh checkpoint"},
@@ -270,7 +284,7 @@ async def test_runner_governs_history_before_summarizing_it(monkeypatch):
             else (600, "test-counter")
         ),
     )
-    consolidate = AsyncMock(return_value="fresh checkpoint")
+    consolidate = _remembering("fresh checkpoint")
 
     await AgentRunner().run(make_run_spec(
         provider,
@@ -351,7 +365,7 @@ async def test_native_compaction_uses_provider_request_boundary(
         "nanobot.agent.context_governance.estimate_prompt_tokens_chain",
         lambda *_args: (100, "test-counter"),
     )
-    consolidate = AsyncMock(return_value="portable checkpoint")
+    consolidate = _remembering("portable checkpoint")
     consolidate_native = AsyncMock(
         return_value="portable checkpoint"
     )
@@ -434,7 +448,7 @@ async def test_runner_keeps_current_tool_exchange_outside_summary(monkeypatch):
         "nanobot.agent.context_governance.estimate_prompt_tokens_chain",
         estimate,
     )
-    consolidate = AsyncMock(return_value="fresh checkpoint")
+    consolidate = _remembering("fresh checkpoint")
 
     result = await AgentRunner().run(make_run_spec(
         provider,
@@ -498,10 +512,13 @@ async def test_repeated_pressure_advances_summary_boundary(monkeypatch):
         "nanobot.agent.context_governance.estimate_prompt_tokens_chain",
         estimate,
     )
-    consolidate = AsyncMock(side_effect=[
-        "checkpoint-1",
-        "checkpoint-2",
-    ])
+    checkpoints = iter(["checkpoint-1", "checkpoint-2"])
+
+    async def remember_next(_messages, _previous):
+        _MEMORY["text"] = next(checkpoints)
+        return _MEMORY["text"]
+
+    consolidate = AsyncMock(side_effect=remember_next)
     compaction_events: list[ContextCompactionEvent] = []
 
     async def observe_compaction(event: ContextCompactionEvent) -> None:
@@ -559,7 +576,7 @@ async def test_runner_refuses_checkpoint_that_cannot_fit_with_delta(monkeypatch)
         "nanobot.agent.context_governance.estimate_prompt_tokens_chain",
         estimate,
     )
-    consolidate = AsyncMock(return_value="small checkpoint")
+    consolidate = _remembering("small checkpoint")
 
     with pytest.raises(ContextWindowExceededError):
         await AgentRunner().run(make_run_spec(

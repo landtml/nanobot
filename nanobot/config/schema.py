@@ -9,7 +9,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from nanobot.config.timezone import detect_system_timezone
 from nanobot.config_base import Base
-from nanobot.cron.types import CronSchedule
 
 if TYPE_CHECKING:
     from nanobot.agent.tools.cli_apps import CliAppsToolConfig
@@ -50,35 +49,20 @@ class TranscriptionConfig(Base):
     max_upload_mb: int = Field(default=25, ge=1, le=100)
 
 
-class DreamConfig(Base):
-    """Dream memory consolidation configuration."""
+class MemoryConfig(Base):
+    """Observational Memory configuration.
 
-    _HOUR_MS = 3_600_000
+    Defaults are those of Mastra Observational Memory 1.1.0, the version behind
+    its LongMemEval result; see ``docs/memory.md`` before changing them.
+    """
 
-    enabled: bool = True  # Register the periodic Dream consolidation job on startup
-    interval_h: int = Field(default=2, ge=1)  # Every 2 hours by default
-    cron: str | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-    )  # Legacy cron expression override
     model_override: str | None = Field(
         default=None,
         validation_alias=AliasChoices("modelOverride", "model", "model_override"),
-    )  # Model preset name for Dream sessions
-
-    def build_schedule(self, timezone: str) -> CronSchedule:
-        """Build the runtime schedule, preferring the legacy cron override if present."""
-        if self.cron:
-            return CronSchedule(kind="cron", expr=self.cron, tz=timezone)
-        return CronSchedule(kind="every", every_ms=self.interval_h * self._HOUR_MS)
-
-    def describe_schedule(self) -> str:
-        """Return a human-readable summary for logs and startup output."""
-        if self.cron:
-            return f"cron {self.cron} (legacy)"
-        hours = self.interval_h
-        return f"every {hours}h"
-
+    )  # Model preset for the Observer and Reflector; None uses the agent's default model
+    message_tokens: int = Field(default=30_000, ge=1_000)  # Observe after this many unobserved tokens
+    observation_tokens: int = Field(default=40_000, ge=1_000)  # Reflect above this log size
+    max_tokens_per_batch: int = Field(default=10_000, ge=1_000)  # Tokens per parallel Observer call
 
 class InlineFallbackConfig(Base):
     """One inline fallback model configuration."""
@@ -144,17 +128,26 @@ class AgentDefaults(Base):
     bot_icon: str = "🐈"  # Short icon (emoji or text) shown next to the bot name in CLI; "" to omit
     unified_session: bool = False  # Share one session across all channels (single-user multi-device)
     disabled_skills: list[str] = Field(default_factory=list)  # Skill names to exclude from loading (e.g. ["summarize", "skill-creator"])
-    session_ttl_minutes: int = Field(
-        default=15,
-        ge=0,
-        validation_alias=AliasChoices("idleCompactAfterMinutes", "sessionTtlMinutes"),
-        serialization_alias="idleCompactAfterMinutes",
-    )  # Auto-compact idle threshold in minutes (0 = disabled)
-    idle_compact_check_interval_seconds: int = Field(
-        default=60,
-        ge=0,
-    )  # Minimum interval in seconds between scans for idle sessions
-    dream: DreamConfig = Field(default_factory=DreamConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def carry_over_dream_model(cls, value: object) -> object:
+        """Use a Dream-era model preset for memory unless memory names its own."""
+        if not isinstance(value, dict):
+            return value
+        data = cast(dict[str, object], value)
+        dream = data.get("dream")
+        if not isinstance(dream, dict) or "memory" in data:
+            return data
+        dream_data = cast(dict[str, object], dream)
+        preset = next(
+            (dream_data[k] for k in ("modelOverride", "model_override", "model") if dream_data.get(k)),
+            None,
+        )
+        if preset is None:
+            return data
+        return {**data, "memory": {"modelOverride": preset}}
 
     @model_validator(mode="before")
     @classmethod
@@ -461,9 +454,9 @@ class Config(BaseSettings):
         name = self.agents.defaults.model_preset
         if name and name != "default" and name not in self.model_presets:
             raise ValueError(f"model_preset {name!r} not found in model_presets")
-        dream_name = self.agents.defaults.dream.model_override
-        if dream_name and dream_name != "default" and dream_name not in self.model_presets:
-            raise ValueError(f"Dream model preset {dream_name!r} not found in model_presets")
+        memory_name = self.agents.defaults.memory.model_override
+        if memory_name and memory_name != "default" and memory_name not in self.model_presets:
+            raise ValueError(f"Memory model preset {memory_name!r} not found in model_presets")
         for fallback in self.agents.defaults.fallback_models:
             if isinstance(fallback, str) and fallback not in self.model_presets:
                 raise ValueError(f"fallback_models entry {fallback!r} not found in model_presets")
@@ -698,9 +691,34 @@ def _resolve_tool_config_refs() -> None:
     Config.model_rebuild()
 
 
+_TOOL_CONFIG_EXPORTS = frozenset({
+    "CliAppsToolConfig",
+    "ExecToolConfig",
+    "FileToolsConfig",
+    "ImageGenerationToolConfig",
+    "MyToolConfig",
+    "WebFetchConfig",
+    "WebSearchConfig",
+    "WebToolsConfig",
+})
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve the tool config re-exports on first use (PEP 562).
+
+    The eager pass below fails when this module is first imported from inside
+    one of those tool modules; ``from nanobot.config.schema import
+    WebSearchConfig`` must work regardless of which module was imported first.
+    """
+    if name in _TOOL_CONFIG_EXPORTS:
+        _resolve_tool_config_refs()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 # Eagerly resolve when the import chain allows it (no circular deps at this
-# point).  If it fails (first import triggers a cycle), the rebuild will
-# happen lazily when Config/ToolsConfig is first used at runtime.
+# point).  If it fails (first import triggers a cycle), the rebuild happens
+# lazily: when Config/ToolsConfig is first used, or a re-export is accessed.
 try:
     _resolve_tool_config_refs()
 except ImportError:

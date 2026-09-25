@@ -1,6 +1,7 @@
 """Tests for ContextBuilder — system prompt and message assembly."""
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -187,18 +188,18 @@ class TestIsTemplateContent:
 
     def test_content_matching_template(self):
         from importlib.resources import files as pkg_files
-        tpl = pkg_files("nanobot") / "templates" / "memory" / "MEMORY.md"
+        tpl = pkg_files("nanobot") / "templates" / "SOUL.md"
         if not tpl.is_file():
-            pytest.skip("MEMORY.md template not bundled")
+            pytest.skip("SOUL.md template not bundled")
         original = tpl.read_text(encoding="utf-8")
-        assert ContextBuilder._is_template_content(original, "memory/MEMORY.md") is True
+        assert ContextBuilder._is_template_content(original, "SOUL.md") is True
 
     def test_modified_content_returns_false(self):
         from importlib.resources import files as pkg_files
-        tpl = pkg_files("nanobot") / "templates" / "memory" / "MEMORY.md"
+        tpl = pkg_files("nanobot") / "templates" / "SOUL.md"
         if not tpl.is_file():
-            pytest.skip("MEMORY.md template not bundled")
-        assert ContextBuilder._is_template_content("totally different", "memory/MEMORY.md") is False
+            pytest.skip("SOUL.md template not bundled")
+        assert ContextBuilder._is_template_content("totally different", "SOUL.md") is False
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +308,7 @@ class TestBuildSystemPrompt:
 
         assert str(tmp_path.resolve()) not in result
         assert "Agent profile: SOUL.md and USER.md" in result
-        assert "History log: memory/history.jsonl" in result
+        assert "Memory: memory/observations.md" in result
         assert "Custom skills: skills/{skill-name}/SKILL.md" in result
 
     def test_selected_project_identity_keeps_agent_data_in_agent_workspace(self, tmp_path):
@@ -329,33 +330,41 @@ class TestBuildSystemPrompt:
         result = builder.build_system_prompt()
         assert "Be helpful and concise." in result
 
-    def test_includes_session_summary(self, tmp_path):
-        builder = _builder(tmp_path)
-        summary = {
-            "text": "Previous chat about Python.",
-            "last_active": "2026-08-19T10:00:00",
-        }
-        result = builder.build_system_prompt(session_summary=summary)
-        assert "Previous chat about Python." in result
-        assert "[Archived Context Summary]" in result
+    def test_includes_memory_block_for_the_session(self, tmp_path):
+        memory = MagicMock()
+        memory.system_prompt_block.return_value = "<observations>\nPython chat\n</observations>"
+        builder = _builder(tmp_path, memory=memory)
+        result = builder.build_system_prompt(memory_key="cli:test")
+        memory.system_prompt_block.assert_called_once_with("cli:test", durable=True)
+        assert result.endswith("# Memory\n<observations>\nPython chat\n</observations>")
 
-    def test_nothing_summary_builds_the_prompt_without_archived_context(self, tmp_path):
-        builder = _builder(tmp_path)
-        summary = {"text": "(nothing)", "last_active": "2026-08-19T10:00:00"}
-        assert builder.build_system_prompt(session_summary=summary) == builder.build_system_prompt()
+    def test_empty_memory_builds_the_prompt_without_a_memory_section(self, tmp_path):
+        memory = MagicMock()
+        memory.system_prompt_block.return_value = None
+        assert (
+            _builder(tmp_path, memory=memory).build_system_prompt(memory_key="cli:test")
+            == _builder(tmp_path).build_system_prompt()
+        )
+
+    def test_private_sessions_ask_only_for_their_own_memory(self, tmp_path):
+        memory = MagicMock()
+        memory.system_prompt_block.return_value = None
+        builder = _builder(tmp_path, memory=memory)
+        builder.build_system_prompt(memory_key="cli:test", durable_memory=False)
+        memory.system_prompt_block.assert_called_once_with("cli:test", durable=False)
 
     def test_sections_separated_by_separator(self, tmp_path):
         (tmp_path / "AGENTS.md").write_text("Rules.", encoding="utf-8")
-        builder = _builder(tmp_path)
-        summary = {"text": "Summary.", "last_active": "2026-08-19T10:00:00"}
-        result = builder.build_system_prompt(session_summary=summary)
-        assert "\n\n---\n\n" in result
+        memory = MagicMock()
+        memory.system_prompt_block.return_value = "Observed."
+        result = _builder(tmp_path, memory=memory).build_system_prompt(memory_key="k")
+        assert "\n\n---\n\n# Memory\nObserved." in result
 
     def test_no_bootstrap_no_summary(self, tmp_path):
         builder = _builder(tmp_path)
         result = builder.build_system_prompt()
         assert "## AGENTS.md" not in result
-        assert "[Archived Context Summary]" not in result
+        assert "# Memory" not in result
 
 
 # ---------------------------------------------------------------------------

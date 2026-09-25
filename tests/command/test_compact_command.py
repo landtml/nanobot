@@ -1,7 +1,6 @@
-"""Manual context compaction command behavior."""
+"""Manual context compaction (``/compact``): observe the session now."""
 
 import asyncio
-from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -15,7 +14,11 @@ from nanobot.bus.runtime_events import TurnCompleted
 from nanobot.command.builtin import cmd_stop
 from nanobot.command.router import CommandContext
 from nanobot.providers.base import GenerationSettings, LLMResponse, ProviderConversationState
-from nanobot.session.history_visibility import is_hidden_history_message
+
+OBSERVED = (
+    "<observations>\nDate: Sep 25, 2026\n* 🔴 (10:00) User asked an important question\n"
+    "</observations>"
+)
 
 
 @pytest.fixture
@@ -26,7 +29,7 @@ async def loop(tmp_path):
     provider.generation = GenerationSettings(max_tokens=100)
     provider.can_resume_conversation_state.return_value = True
     provider.chat_stream_with_retry = AsyncMock(return_value=LLMResponse(
-        content="Portable checkpoint.",
+        content=OBSERVED,
         finish_reason="stop",
     ))
     loop = AgentLoop(
@@ -75,12 +78,10 @@ async def test_compact_emits_one_lifecycle_and_keeps_the_session(loop, command) 
     loop.sessions.invalidate("cli:test")
     reloaded = loop.sessions.get_or_create("cli:test")
     assert reloaded.provider_state is None
-    assert reloaded.messages[:-1] == session.messages
-    assert is_hidden_history_message(reloaded.messages[-1])
+    assert reloaded.messages == session.messages
     assert reloaded.last_archived == 2
     assert reloaded.get_history() == []
-    assert reloaded.metadata["_last_summary"]["text"] == "Portable checkpoint."
-    assert len(loop.consolidator.store.read_unprocessed_history(0)) == 1
+    assert "User asked an important question" in loop.memory.observations()
 
     response = await loop._process_message(msg, runtime=loop.llm_runtime())
     assert response is None
@@ -89,37 +90,24 @@ async def test_compact_emits_one_lifecycle_and_keeps_the_session(loop, command) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("trigger", "summary"),
-    [
-        ("manual", "The checkpoint inspection is complete."),
-        ("idle", "(nothing)"),
-    ],
-)
-async def test_compacted_session_waits_for_new_input_without_continuation(
-    loop, trigger, summary,
-) -> None:
+@pytest.mark.parametrize("observer_output", [OBSERVED, "Nothing worth keeping."])
+async def test_compacted_session_resumes_from_memory_with_new_input(loop, observer_output) -> None:
     key = "cli:checkpoint-resume"
     session = loop.sessions.get_or_create(key)
     session.add_message("user", "Inspect the checkpoint")
     session.add_message("assistant", "Inspection complete.")
     loop.sessions.save(session)
     loop.provider.estimate_prompt_tokens.return_value = (100, "test")
-    loop.provider.chat_stream_with_retry.return_value = LLMResponse(content=summary)
+    loop.provider.chat_stream_with_retry.return_value = LLMResponse(content=observer_output)
 
-    if trigger == "manual":
-        await loop._process_message(
-            InboundMessage(channel="cli", sender_id="user", chat_id="checkpoint-resume",
-                           content="/compact"),
-            runtime=loop.llm_runtime(),
-        )
-    else:
-        await loop.auto_compact._archive(key, runtime=loop.llm_runtime())
+    await loop._process_message(
+        InboundMessage(channel="cli", sender_id="user", chat_id="checkpoint-resume",
+                       content="/compact"),
+        runtime=loop.llm_runtime(),
+    )
 
     loop.sessions.invalidate(key)
-    loop.auto_compact._summaries.clear()
     reloaded = loop.sessions.get_or_create(key)
-    assert reloaded.metadata["_last_summary"]["text"] == summary
     assert reloaded.last_archived == 2
     assert reloaded.get_history() == []
     loop.provider.chat_stream_with_retry.assert_awaited_once()
@@ -129,15 +117,16 @@ async def test_compacted_session_waits_for_new_input_without_continuation(
     loop.provider.chat_stream_with_retry.return_value = LLMResponse(content="Hello!")
     response = await loop.process_direct("hi", session_key=key)
     assert response.content == "Hello!"
-    loop.provider.chat_stream_with_retry.assert_awaited_once()
-    sent = loop.provider.chat_stream_with_retry.call_args.kwargs["messages"]
-    expected_summary = reloaded.metadata["_last_summary"] if summary != "(nothing)" else None
-    assert sent[0] == {
-        "role": "system",
-        "content": loop.context.build_system_prompt(channel="cli", session_summary=expected_summary),
-    }
+    sent = loop.provider.chat_stream_with_retry.await_args_list[0].kwargs["messages"]
     assert [message["role"] for message in sent] == ["system", "user"]
-    assert sent[1]["content"] == "hi"
+    assert "Inspect the checkpoint" not in str(sent)
+    assert sent[1]["content"].endswith("hi")
+    if observer_output == OBSERVED:
+        assert "User asked an important question" in sent[0]["content"]
+        assert sent[1]["content"].startswith("<system-reminder>")
+    else:
+        assert "<observations>" not in sent[0]["content"]
+        assert sent[1]["content"] == "hi"
 
     loop.sessions.invalidate(key)
     resumed = loop.sessions.get_or_create(key)
@@ -149,9 +138,7 @@ async def test_compacted_session_waits_for_new_input_without_continuation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("legacy_commands", [False, True])
-async def test_empty_compact_finishes_silently_and_does_not_schedule_idle_archive(
-    loop, legacy_commands,
-) -> None:
+async def test_empty_compact_finishes_silently(loop, legacy_commands) -> None:
     key = "websocket:test"
     session = loop.sessions.get_or_create(key)
     session.add_message("user", "already archived")
@@ -176,14 +163,8 @@ async def test_empty_compact_finishes_silently_and_does_not_schedule_idle_archiv
     reloaded = loop.sessions.get_or_create(key)
     assert reloaded.messages == session.messages
     assert reloaded.last_archived == 2
-    assert loop.consolidator.store.read_unprocessed_history(0) == []
-
-    reloaded.updated_at = datetime.now() - timedelta(minutes=30)
-    loop.sessions.save(reloaded)
-    loop.auto_compact._ttl = 1
-    schedule = MagicMock()
-    loop.auto_compact.check_expired(schedule, loop.runtime_for_session)
-    schedule.assert_not_called()
+    assert loop.memory.observations() == ""
+    loop.provider.chat_stream_with_retry.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -237,17 +218,17 @@ async def test_compact_is_a_fifo_barrier_during_an_active_turn(loop) -> None:
     release = asyncio.Event()
     requests = []
     compacted_history = []
-    compact = loop.consolidator.compact_idle_session
+    compact = loop.memory.compact
 
-    async def capture_compaction(*args, **kwargs):
-        compacted_history.extend(
-            dict(message) for message in loop.sessions.get_or_create(key).messages
-        )
-        return await compact(*args, **kwargs)
+    async def capture_compaction(session):
+        compacted_history.extend(dict(message) for message in session.messages)
+        return await compact(session)
 
-    loop.consolidator.compact_idle_session = capture_compaction
+    loop.memory.compact = capture_compaction
 
     async def chat(*, messages, **kwargs):
+        if messages[0]["content"].startswith("You are the memory consciousness"):
+            return LLMResponse(content=OBSERVED, finish_reason="stop")
         requests.append([dict(message) for message in messages])
         if len(requests) == 1:
             started.set()
@@ -362,7 +343,7 @@ async def test_stop_finishes_inflight_compaction_as_cancelled(loop) -> None:
 
 
 @pytest.mark.asyncio
-async def test_idle_and_manual_compact_share_persisted_checkpoint(loop) -> None:
+async def test_compact_observes_tool_heavy_turns_once(loop) -> None:
     key = "cli:test"
     session = loop.sessions.get_or_create(key)
     session.add_message("user", "large tool turn")
@@ -374,27 +355,19 @@ async def test_idle_and_manual_compact_share_persisted_checkpoint(loop) -> None:
         session.add_message("tool", "x" * 10_000, tool_call_id=f"tool-{i}")
     session.add_message("assistant", "done")
     loop.sessions.save(session)
-    runtime = loop.llm_runtime()
-    await loop.consolidator.compact_idle_session(key, runtime=runtime)
-    assert loop.sessions.get_or_create(key).get_history() == []
+    command = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/compact")
 
-    await loop._process_message(
-        InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/compact"),
-        runtime=runtime,
-    )
+    await loop._process_message(command, runtime=loop.llm_runtime())
     loop.provider.chat_stream_with_retry.assert_awaited_once()
-    assert loop.bus.outbound_size == 0
+    prompt = loop.provider.chat_stream_with_retry.call_args.kwargs["messages"][1]["content"]
+    assert prompt.count("[Tool Call: exec]") == 20
+    assert prompt.count("[Tool Result: exec]") == 20
     loop.sessions.invalidate(key)
     reloaded = loop.sessions.get_or_create(key)
-    assert len(reloaded.messages) == 43
-    assert is_hidden_history_message(reloaded.messages[-1])
+    assert len(reloaded.messages) == 42
+    assert reloaded.last_archived == 42
     assert reloaded.get_history() == []
-    assert reloaded.metadata["_last_summary"]["text"] == "Portable checkpoint."
 
-    reloaded.add_message("user", "next question")
-    reloaded.add_message("assistant", "next answer")
-    loop.sessions.save(reloaded)
-    await loop.consolidator.compact_idle_session(key, runtime=runtime)
-    loop.sessions.invalidate(key)
-    reloaded = loop.sessions.get_or_create(key)
-    assert reloaded.get_history() == []
+    # Nothing new: the second /compact is silent and makes no model call.
+    await loop._process_message(command, runtime=loop.llm_runtime())
+    loop.provider.chat_stream_with_retry.assert_awaited_once()

@@ -120,8 +120,10 @@ def system_settings_payload(
                 "enabled": config.gateway.heartbeat.enabled,
                 "interval_s": config.gateway.heartbeat.interval_s,
             },
-            "dream": {
-                "schedule": defaults.dream.describe_schedule(),
+            "memory": {
+                "message_tokens": defaults.memory.message_tokens,
+                "observation_tokens": defaults.memory.observation_tokens,
+                "model_override": defaults.memory.model_override,
             },
             "unified_session": defaults.unified_session,
         },

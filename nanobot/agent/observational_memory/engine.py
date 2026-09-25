@@ -192,8 +192,12 @@ class ObservationalMemory:
             return 0
         return thread.observed_count
 
-    def observations_for(self, key: str | None) -> str:
-        observations = self.store.read().observations
+    def observations_for(self, key: str | None, *, durable: bool = True) -> str:
+        """The log *key* sees: the workspace log plus its own transient additions.
+
+        ``durable=False`` leaves out the workspace log, for private sessions.
+        """
+        observations = self.store.read().observations if durable else ""
         extra = self._ephemeral.get(key or "")
         if extra:
             return f"{observations}\n\n{extra}" if observations else extra
@@ -203,13 +207,14 @@ class ObservationalMemory:
         self,
         key: str | None,
         *,
+        durable: bool = True,
         other_conversations: str | None = None,
     ) -> str | None:
         """The Actor's memory block for session *key*, or None before any observation."""
-        observations = self.observations_for(key)
+        observations = self.observations_for(key, durable=durable)
         if not observations:
             return None
-        thread = self.thread_state(key) if key else None
+        thread = self.thread_state(key) if key and durable else None
         return prompts.observations_context(
             text.render_observations(observations, self.now(), self.timezone),
             current_task=thread.current_task if thread else None,
@@ -242,10 +247,20 @@ class ObservationalMemory:
         return ""
 
     def pending_tokens(self, key: str | None, pending: Sequence[PendingThread]) -> float:
-        """Unobserved tokens that count toward the observation threshold."""
+        """Unobserved tokens that count toward the observation threshold.
+
+        Counts every other session in full, as upstream does; only the Actor's
+        view of them is bounded (:meth:`other_conversations`).
+        """
         current = next((t for t in pending if t.key == key), None)
         own = tokens.count_messages(current.messages) if current else 0
-        return own + tokens.count_string(self.other_conversations(key, pending))
+        others = {thread.key: list(thread.messages) for thread in pending if thread.key != key}
+        if not others:
+            return own
+        block = text.format_other_conversations(
+            others, key or "", self.timezone, text.obscure_thread_id,
+        )
+        return own + tokens.count_string(block)
 
     # -- observing -------------------------------------------------------------
 
@@ -283,22 +298,24 @@ class ObservationalMemory:
         model: ModelCall,
         *,
         persist: bool = True,
-    ) -> str | None:
+        durable: bool = True,
+    ) -> ObservationOutcome | None:
         """Observe one session immediately (context pressure or ``/compact``).
 
-        Returns the new observations for this thread, or None when the Observer
-        produced nothing. With ``persist=False`` nothing is written: the result
-        only extends that session's own view of memory.
+        Returns None when there was nothing to observe or the cycle was
+        discarded. An outcome means the messages are observed, even if the
+        Observer found nothing worth keeping. With ``persist=False`` nothing is
+        written: new observations only extend that session's own view of memory
+        (one-off runs, private chats, subagents). ``durable=False`` also keeps
+        the workspace log away from the Observer, matching what a private
+        session's Actor sees.
         """
         if not thread.messages:
             return None
         async with self._lock:
-            outcome = await self._observe([[thread]], model, persist=persist)
-        if outcome is None:
-            return None
-        if not persist:
-            return self._ephemeral.get(thread.key)
-        return self.store.read().observations or None
+            return await self._observe(
+                [[thread]], model, persist=persist and durable, durable=durable,
+            )
 
     def _still_pending(self, thread: PendingThread) -> bool:
         state = self.thread_state(thread.key)
@@ -310,42 +327,55 @@ class ObservationalMemory:
         model: ModelCall,
         *,
         persist: bool,
+        durable: bool = True,
     ) -> ObservationOutcome | None:
         snapshot = self.store.read()
-        existing = self.observations_for(batches[0][0].key if not persist else None)
-        if persist:
-            existing = snapshot.observations
+        threads = [thread for batch in batches for thread in batch]
+        # What the Observer is told it already knows: exactly what the Actor sees.
+        existing = (
+            snapshot.observations
+            if persist
+            else self.observations_for(threads[0].key, durable=durable)
+        )
         results = await asyncio.gather(
             *(self._call_observer(existing, batch, model) for batch in batches)
         )
         merged: dict[str, ObserverResult] = {}
         for result in results:
             merged.update(result)
-        threads = [thread for batch in batches for thread in batch]
-        now = self.now()
 
-        observations = existing
-        for thread in threads:
-            result = merged.get(thread.key)
-            if result is None or not result.observations:
-                continue
-            section = text.wrap_with_thread_tag(text.obscure_thread_id(thread.key), result.observations)
-            observations = text.replace_or_append_thread_section(observations, section)
+        def add_sections(base: str) -> str:
+            for thread in threads:
+                result = merged.get(thread.key)
+                if result is None or not result.observations:
+                    continue
+                section = text.wrap_with_thread_tag(
+                    text.obscure_thread_id(thread.key), result.observations,
+                )
+                base = text.replace_or_append_thread_section(base, section)
+            return base
 
         if not persist:
             key = threads[0].key
-            if observations != existing:
-                self._ephemeral[key] = observations
+            overlay = add_sections(self._ephemeral.get(key, ""))
+            if overlay:
+                self._ephemeral[key] = overlay
             return ObservationOutcome(threads=(key,), observation_tokens=0, reflected=False)
+
+        now = self.now()
+        observations = add_sections(snapshot.observations)
 
         def apply(current: Snapshot) -> Snapshot:
             thread_states = dict(current.state.threads)
             for thread in threads:
                 result = merged.get(thread.key, ObserverResult(observations=""))
                 previous = thread_states.get(thread.key, ThreadState())
+                advanced = thread.end > previous.observed_count
                 thread_states[thread.key] = ThreadState(
-                    observed_count=thread.end,
-                    observed_fingerprint=thread.fingerprint,
+                    observed_count=thread.end if advanced else previous.observed_count,
+                    observed_fingerprint=(
+                        thread.fingerprint if advanced else previous.observed_fingerprint
+                    ),
                     current_task=result.current_task or previous.current_task,
                     suggested_response=result.suggested_response or previous.suggested_response,
                     last_observed_at=now.isoformat(),
@@ -460,5 +490,29 @@ class ObservationalMemory:
         )
         return committed
 
+    def ephemeral_observations(self, key: str) -> str:
+        """Observations recorded for *key* without being written to memory."""
+        return self._ephemeral.get(key, "")
+
     def forget_ephemeral(self, key: str) -> None:
         self._ephemeral.pop(key, None)
+
+    def retire_thread(self, key: str) -> None:
+        """Forget a finished conversation's cursor, task and suggestion.
+
+        Its observations stay in the log; only the per-session bookkeeping goes,
+        so a fresh conversation under the same key starts without a stale task.
+        """
+        self._ephemeral.pop(key, None)
+        snapshot = self.store.read()
+        if key not in snapshot.state.threads:
+            return
+
+        def apply(current: Snapshot) -> Snapshot:
+            threads = {k: v for k, v in current.state.threads.items() if k != key}
+            return replace(current, state=replace(current.state, threads=threads))
+
+        try:
+            self.store.commit(snapshot.state.revision, apply)
+        except StaleStateError:
+            logger.debug("Observational memory: retiring {} raced another writer", key)

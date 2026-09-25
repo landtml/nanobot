@@ -50,7 +50,7 @@ def _loop(tmp_path, responses: list[str], **kwargs) -> AgentLoop:
 @pytest.mark.asyncio
 async def test_transient_session_keeps_history_without_persisting_or_durable_tools(tmp_path) -> None:
     loop = _loop(tmp_path, ["first answer", "second answer"])
-    loop.context.memory.write_memory("private durable memory")
+    loop.memory.replace_observations("Date: Sep 25, 2026\n* 🔴 (10:00) private durable memory")
     key = "websocket:transient-test"
     loop.sessions.get_or_create_transient(
         key,

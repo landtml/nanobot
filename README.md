@@ -55,7 +55,7 @@ nanobot is a self-hosted personal AI agent runtime. It can:
 - run in a browser WebUI or terminal
 - connect to Telegram, Discord, Slack, WeChat, Email, Mattermost, Linear, and other channels
 - use tools such as files, shell, web search, web fetch, MCP, cron, image generation, and subagents
-- keep session history and long-term memory through Dream
+- keep session history and long-term memory through Observational Memory
 - run long-horizon goals and scheduled automations
 - expose a Python SDK and OpenAI-compatible API for integrations
 - deploy as a long-running local or server-side agent gateway

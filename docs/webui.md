@@ -179,10 +179,10 @@ rate when reported. Provider usage may be estimated or unavailable; these
 figures are not a billing statement.
 
 When nanobot compacts context, the timeline shows its progress and outcome.
-The model continues with a summary and any messages after it; messages covered
-by the summary remain in your chat history but are no longer sent to the model
-verbatim. Use `/compact` to compact the current topic's context manually.
-See [Memory](./memory.md) for compaction and Dream consolidation.
+The observed messages are carried by memory from then on; they remain in your
+chat history but are no longer sent to the model verbatim. Use `/compact` to
+observe the current topic now. See [Memory](./memory.md) for how observation
+and reflection work.
 
 ## Temporary Chats
 
@@ -243,7 +243,7 @@ available to the current topic.
 In Restricted mode, ordinary file and shell work stays inside the selected
 project. To preserve agent continuity, filesystem/search tools receive narrow,
 read-only access to built-in skills, custom skills in the agent workspace, and
-the exact agent `memory/history.jsonl` file. This does not grant access to
+the exact agent `memory/observations.md` file. This does not grant access to
 neighboring memory or profile files, and it does not allow writes outside the
 selected project. These tool exceptions do not broaden the browser's file
 preview boundary.

@@ -26,8 +26,8 @@ protected from normal automation edits.
 ## Before You Create One
 
 Keep `nanobot gateway` running. The gateway owns background delivery for chat
-apps, WebUI topics, scheduled automations, local triggers, heartbeat, and
-Dream jobs.
+apps, WebUI topics, scheduled automations, local triggers, and heartbeat
+jobs.
 
 Use the same workspace and config for the gateway and any process that sends
 local trigger messages. If you run multiple nanobot instances, pass the matching

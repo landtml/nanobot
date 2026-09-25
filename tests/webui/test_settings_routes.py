@@ -578,7 +578,7 @@ async def test_runtime_settings_only_save_without_refreshing_or_rebinding(tmp_pa
     router = _router(config_path=tmp_path / "config.json", refresh_runtime_config=refresh)
     path = "/api/settings/runtime-config/update"
     response = await router.dispatch(None, _mutation_request(path, {
-        "values": {"agents.defaults.dream.enabled": False, "api.timeout": 45},
+        "values": {"agents.defaults.memory.message_tokens": 12_000, "api.timeout": 45},
     }), path)
     assert response.status_code == 200
     assert json.loads(response.body)["requires_restart"]
@@ -589,7 +589,7 @@ async def test_runtime_settings_only_save_without_refreshing_or_rebinding(tmp_pa
 async def test_reverting_runtime_switch_clears_restart_but_preserves_other_changes(tmp_path):
     router = _router(config_path=tmp_path / "config.json")
     config = router.settings.config.load()
-    original_memory = config.agents.defaults.dream.enabled
+    original_memory = config.agents.defaults.memory.message_tokens
     original_web = config.tools.web.enable
     path = "/api/settings/runtime-config/update"
 
@@ -598,9 +598,13 @@ async def test_reverting_runtime_switch_clears_restart_but_preserves_other_chang
         assert response.status_code == 200
         return json.loads(response.body)
 
-    assert (await update({"agents.defaults.dream.enabled": not original_memory}))["requires_restart"]
+    assert (await update({"agents.defaults.memory.message_tokens": original_memory + 1_000}))[
+        "requires_restart"
+    ]
     await update({"tools.web.enable": not original_web})
-    assert (await update({"agents.defaults.dream.enabled": original_memory}))["requires_restart"]
+    assert (await update({"agents.defaults.memory.message_tokens": original_memory}))[
+        "requires_restart"
+    ]
     reverted = await update({"tools.web.enable": original_web})
     assert reverted["requires_restart"] is False
     assert reverted["restart_required_sections"] == []

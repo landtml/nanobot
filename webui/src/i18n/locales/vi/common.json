@@ -138,7 +138,8 @@
       "fields": {
         "agents_defaults_timezone_mode": {"label": "Dùng múi giờ hệ thống", "help": "Tắt để chọn múi giờ thủ công."},
         "agents_defaults_timezone": {"label": "Múi giờ", "help": "Chọn múi giờ. Độ lệch UTC được tính theo ngày hiện tại."},
-        "agents_defaults_dream_enabled": {"label": "Sắp xếp bộ nhớ", "help": "Tự động sắp xếp thông tin hữu ích từ cuộc trò chuyện. Bộ nhớ hiện có vẫn được sử dụng khi tắt."},
+        "agents_defaults_memory_message_tokens": {"label": "Quan sát sau (token)", "help": "Số token hội thoại chưa được quan sát sẽ kích hoạt một lần quan sát. Mặc định 30.000."},
+        "agents_defaults_memory_observation_tokens": {"label": "Cô đọng bộ nhớ khi vượt quá (token)", "help": "Kích thước nhật ký quan sát kích hoạt việc suy ngẫm. Mặc định 40.000."},
         "gateway_heartbeat_enabled": {"label": "Kiểm tra định kỳ", "help": "Kiểm tra các tác vụ trong HEARTBEAT.md định kỳ."},
         "gateway_heartbeat_interval_s": {"label": "Chu kỳ kiểm tra (giây)", "help": "Gateway lên lịch kiểm tra định kỳ khi khởi động."},
         "agents_defaults_max_tool_iterations": {"label": "Giới hạn vòng lặp công cụ mỗi lượt", "help": "Số lần trao đổi tối đa giữa mô hình và công cụ trong một lượt."},
@@ -181,7 +182,7 @@
       "groups": {
         "chat": {"title": "Quyền trò chuyện WebUI", "help": "Truy cập dịch vụ cục bộ và quyền trò chuyện mặc định."},
         "identity": {"title": "Múi giờ", "help": "Chọn múi giờ cho tác vụ đã lên lịch."},
-        "memory": {"title": "Bộ nhớ", "help": "Bật hoặc tắt tính năng tự động sắp xếp bộ nhớ."},
+        "memory": {"title": "Bộ nhớ", "help": "Bộ nhớ quan sát biến các cuộc trò chuyện dài thành những quan sát có ngày tháng, dùng chung giữa các cuộc trò chuyện."},
         "heartbeat": {"title": "Lịch kiểm tra định kỳ", "help": "Cấu hình kiểm tra tác vụ định kỳ tích hợp."},
         "execution": {"title": "Giới hạn tác nhân", "help": "Thực thi công cụ và cách thử lại."},
         "sessions": {"title": "Cuộc trò chuyện", "help": "Chia sẻ cuộc trò chuyện giữa các nền tảng."},
@@ -504,7 +505,7 @@
         "user": "Trò chuyện",
         "api": "API",
         "cron": "Tự động hóa",
-        "dream": "Sắp xếp bộ nhớ",
+        "memory": "Sắp xếp bộ nhớ",
         "system": "Lượt gọi phụ trợ"
       }
     },
@@ -1528,21 +1529,17 @@
             "title": "Hiển thị lịch sử",
             "description": "In N tin nhắn hội thoại đã lưu gần nhất."
           },
-          "dream": {
-            "title": "Chạy Dream",
-            "description": "Kích hoạt thủ công quá trình hợp nhất bộ nhớ."
+          "memory": {
+            "title": "Bộ nhớ",
+            "description": "Xem những gì nanobot ghi nhớ; `/memory reflect` cô đọng bộ nhớ ngay."
           },
-          "dream_log": {
-            "title": "Hiển thị nhật ký Dream",
-            "description": "Hiển thị những gì lần hợp nhất Dream gần nhất đã thay đổi."
+          "memory_log": {
+            "title": "Nhật ký bộ nhớ",
+            "description": "Xem thay đổi gần nhất của bộ nhớ."
           },
-          "dream_restore": {
+          "memory_restore": {
             "title": "Khôi phục bộ nhớ",
-            "description": "Đưa bộ nhớ về một ảnh chụp Dream trước đó."
-          },
-          "dream_prompt": {
-            "title": "Bộ nhớ Dream",
-            "description": "Cho Dream biết cách sắp xếp bộ nhớ của không gian làm việc này."
+            "description": "Đưa bộ nhớ về một phiên bản trước."
           },
           "goal": {
             "title": "Mục tiêu dài hạn",

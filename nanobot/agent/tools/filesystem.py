@@ -74,7 +74,7 @@ class _FsTool(Tool):
             else allowed_dir is not None
         )
         self._sandbox_restricts_workspace = sandbox_restricts_workspace
-        # Explicit state is used by isolated runners like Dream/subagents.
+        # Explicit state is used by isolated runners like subagents.
         # Main AgentLoop tools leave this unset and resolve state from the
         # current async task, which keeps shared tool instances session-safe.
         self._explicit_file_states = file_states
@@ -92,13 +92,13 @@ class _FsTool(Tool):
         )
         sandbox_restricts = bool(ctx.config.exec.sandbox)
         allowed_dir = agent_workspace if restrict else None
-        # Agent-owned skills stay available from project scopes. History is a narrower
-        # capability: expose only the append-only log, not the surrounding memory directory.
+        # Agent-owned skills stay available from project scopes. Memory is a narrower
+        # capability: expose only the observation log, not the surrounding memory directory.
         return cls(
             workspace=agent_workspace,
             allowed_dir=allowed_dir,
             extra_read_allowed_dirs=[BUILTIN_SKILLS_DIR, resolved_agent_workspace / "skills"],
-            extra_read_allowed_files=[resolved_agent_workspace / "memory" / "history.jsonl"],
+            extra_read_allowed_files=[resolved_agent_workspace / "memory" / "observations.md"],
             file_states=ctx.file_state_store,
             restrict_to_workspace=ctx.config.restrict_to_workspace,
             sandbox_restricts_workspace=sandbox_restricts,

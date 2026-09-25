@@ -18,6 +18,7 @@ from nanobot.sdk.types import (
 
 if TYPE_CHECKING:
     from nanobot.agent.loop import AgentLoop
+    from nanobot.agent.memory import MemoryStatus
 
 
 class SessionClient:
@@ -153,29 +154,32 @@ class SessionClient:
 
 
 class MemoryClient:
-    """Long-term memory helpers exposed through ``bot.memory``."""
+    """Observational memory exposed through ``bot.memory``."""
 
     def __init__(self, loop: AgentLoop) -> None:
         self._loop = loop
 
     def read(self) -> str:
-        """Read ``memory/MEMORY.md``."""
-        return self._loop.context.memory.read_memory()
+        """Return the observation log (``memory/observations.md``)."""
+        return self._loop.memory.observations()
 
     def write(self, text: str) -> None:
-        """Overwrite ``memory/MEMORY.md``."""
-        self._loop.context.memory.write_memory(text)
+        """Replace the observation log; the change is versioned like any other."""
+        self._loop.memory.replace_observations(text)
 
-    def append_history(self, text: str, *, session_key: str | None = None) -> int:
-        """Append one entry to ``memory/history.jsonl`` and return its cursor."""
-        return self._loop.context.memory.append_history(text, session_key=session_key)
+    def status(self, session_key: str | None = None) -> MemoryStatus:
+        """Token counts, thresholds and reflection history, from *session_key*'s view."""
+        session = self._loop.sessions.get_or_create(session_key) if session_key else None
+        return self._loop.memory.status(session)
 
-    def read_history(self, *, session_key: str | None = None) -> list[dict[str, Any]]:
-        """Read memory history entries, optionally filtered by session."""
-        entries = self._loop.context.memory.read_unprocessed_history(since_cursor=0)
-        if session_key is not None:
-            entries = [entry for entry in entries if entry.get("session_key") == session_key]
-        return deepcopy(entries)
+    async def observe(self, session_key: str) -> bool:
+        """Observe one session now; True when its messages were folded into memory."""
+        session = self._loop.sessions.get_or_create(session_key)
+        return await self._loop.memory.compact(session)
+
+    async def reflect(self, guidance: str | None = None) -> bool:
+        """Condense the observation log now, optionally steered by *guidance*."""
+        return await self._loop.memory.reflect(guidance)
 
 
 class RuntimeClient:
@@ -209,21 +213,7 @@ class RuntimeClient:
         return self._loop.bus.subscribe(handler, SessionTurnPersisted)
 
     async def compact_session(self, session_key: str) -> SessionSnapshot:
-        """Summarize one session and exclude its archived messages from replay."""
+        """Observe one session now and exclude the observed messages from replay."""
         session = self._loop.sessions.get_or_create(session_key)
-        runtime = self._loop.runtime_for_session(session)
-        await self._loop.consolidator.compact_idle_session(
-            session_key,
-            runtime=runtime,
-        )
+        await self._loop.memory.compact(session)
         return snapshot_from_session(self._loop.sessions.get_or_create(session_key))
-
-    async def compact_idle_session(self, session_key: str, *, max_suffix: int = 0) -> str | None:
-        """Return a replacement summary; legacy ``max_suffix`` no longer retains history."""
-        session = self._loop.sessions.get_or_create(session_key)
-        runtime = self._loop.runtime_for_session(session)
-        return await self._loop.consolidator.compact_idle_session(
-            session_key,
-            runtime=runtime,
-            max_suffix=max_suffix,
-        )

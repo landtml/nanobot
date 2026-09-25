@@ -43,7 +43,7 @@ from nanobot.utils.llm_runtime import LLMRuntime
 from nanobot.utils.prompt_templates import render_template
 
 if TYPE_CHECKING:
-    from nanobot.agent.memory import Consolidator
+    from nanobot.agent.memory import Memory
 
 
 class _SubagentOrigin(TypedDict):
@@ -111,7 +111,7 @@ class SubagentManager:
         disabled_skills: list[str] | None = None,
         max_iterations: int | None = None,
         max_concurrent_subagents: int | None = None,
-        consolidator: Consolidator | None = None,
+        memory: Memory | None = None,
     ):
         if workspace is None:
             raise TypeError("SubagentManager.__init__() missing required argument: 'workspace'")
@@ -154,7 +154,7 @@ class SubagentManager:
             if max_concurrent_subagents is not None
             else defaults.max_concurrent_subagents
         )
-        self.consolidator = consolidator
+        self.memory = memory
         self._run_slots = asyncio.Semaphore(self.max_concurrent_subagents)
         self.runner = AgentRunner()
         self._exec_session_manager = ExecSessionManager()
@@ -431,28 +431,19 @@ class SubagentManager:
                 runtime=runtime,
             ))
             token = bind_workspace_scope(workspace_scope) if workspace_scope is not None else None
+            memory_key = f"subagent:{task_id}"
             try:
-                tool_definitions = tools.get_definitions()
                 consolidate_history = (
-                    partial(
-                        self.consolidator.summarize_transcript,
-                        runtime=runtime,
-                        session_key=f"subagent:{task_id}",
-                        tools=tool_definitions,
-                        persist=False,
+                    self.memory.compactor(
+                        None, session_key=memory_key, history_length=0,
+                        persist=False, durable=False,
                     )
-                    if self.consolidator is not None
+                    if self.memory is not None
                     else None
                 )
                 consolidate_provider_compaction = (
-                    partial(
-                        self.consolidator.summarize_provider_compaction,
-                        runtime=runtime,
-                        session_key=f"subagent:{task_id}",
-                        tools=tool_definitions,
-                        persist=False,
-                    )
-                    if self.consolidator is not None
+                    partial(self.memory.provider_compactor_adapter, consolidate_history)
+                    if self.memory is not None and consolidate_history is not None
                     else None
                 )
                 result = await self.runner.run(AgentRunSpec(
@@ -479,6 +470,8 @@ class SubagentManager:
                 if token is not None:
                     reset_workspace_scope(token)
                 reset_request_context(request_token)
+                if self.memory is not None:
+                    self.memory.forget_session(memory_key)
             status.phase = "done"
             status.stop_reason = result.stop_reason
 
@@ -573,16 +566,16 @@ class SubagentManager:
             self.workspace,
             disabled_skills=self.disabled_skills,
         ).build_skills_summary(workspace=project_workspace)
-        history_log = (
-            str(agent_workspace / "memory" / "history.jsonl")
+        observations = (
+            str(agent_workspace / "memory" / "observations.md")
             if agent_workspace != project_workspace
-            else "memory/history.jsonl"
+            else "memory/observations.md"
         )
         return render_template(
             "agent/subagent_system.md",
             workspace=str(project_workspace),
             agent_workspace=str(agent_workspace),
-            history_log=history_log,
+            observations=observations,
             skills_summary=skills_summary or "",
         )
 

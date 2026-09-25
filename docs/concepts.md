@@ -80,7 +80,7 @@ That flow is the same whether the message starts in the CLI, WebUI, Telegram, Di
 |---|---|---|
 | CLI one-shot | `nanobot agent -m "..."` | First-run checks, scripts, and quick local questions |
 | CLI interactive | `nanobot agent` | Terminal chat with persistent session history |
-| Gateway | `nanobot gateway` | Chat apps, WebUI, heartbeat, Dream, and long-running service mode |
+| Gateway | `nanobot gateway` | Chat apps, WebUI, heartbeat, and long-running service mode |
 | OpenAI-compatible API | `nanobot serve` | Programmatic access through `/v1/chat/completions` |
 | WebUI | `nanobot webui` | Prepare the local WebUI, start the gateway, and open the browser workbench |
 
@@ -120,16 +120,19 @@ Each channel maps inbound messages to a session key. That lets independent conve
 
 `agents.defaults.unifiedSession` can intentionally share one session across channels for a single-user multi-device setup. Leave it off if you expect separate people, groups, channels, or projects to keep separate context.
 
-## Memory, Sessions, and Dream
+## Memory and Sessions
 
 nanobot uses two related stores:
 
 | Store | Location | Purpose |
 |---|---|---|
-| Sessions | `<config-dir>/sessions/<workspace-id>/*.jsonl` | Recent conversation turns replayed into context |
-| Memory | `<workspace>/memory/MEMORY.md` and `<workspace>/memory/history.jsonl` | Long-term facts and consolidated history |
+| Sessions | `<config-dir>/sessions/<workspace-id>/*.jsonl` | The full conversation; its unobserved part is replayed into context |
+| Memory | `<workspace>/memory/observations.md` | Dated observations shared by every conversation in the workspace |
 
-Dream is a periodic consolidation job. It reads accumulated history and updates workspace memory so useful context can survive beyond short session replay.
+Memory is Observational Memory. As conversations grow, an Observer turns what
+has not been observed yet into observations, and a Reflector condenses them
+when the log grows large. Every conversation sees the log, so what was said in
+one chat carries into the others.
 
 The configured workspace contains a `.nanobot/workspace-id` file. It contains only an
 opaque random identifier—never conversation content or credentials. Keep it with workspace
@@ -178,8 +181,9 @@ Security-sensitive controls live in [`configuration.md#security`](./configuratio
 When `nanobot gateway` starts, it runs workspace-scoped automations and
 registers system jobs:
 
-- `dream`, when `agents.defaults.dream.enabled` is true;
 - `heartbeat`, when `gateway.heartbeat.enabled` is true.
+
+Memory needs no scheduled job: it observes after replies, as conversations grow.
 
 Heartbeat reads `<workspace>/HEARTBEAT.md`. If the file has tasks under `## Active Tasks`, nanobot executes them and sends only useful/actionable results to the most recently active chat target. Routine "nothing changed" results are suppressed.
 

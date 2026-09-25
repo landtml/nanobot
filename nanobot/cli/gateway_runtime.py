@@ -147,26 +147,6 @@ def _install_gateway_shutdown_handlers(
     return restore
 
 
-def _advance_dream_cursor_if_behind(memory: Any) -> None:
-    latest = memory.get_latest_cursor()
-    if memory.get_last_dream_cursor() < latest:
-        memory.set_last_dream_cursor(latest)
-
-
-def _commit_dream_changes(memory: Any) -> str | None:
-    """Commit durable Dream edits, without entering the commit path for a no-op run."""
-    if not memory.git.is_initialized():
-        return None
-    diff_body = memory.dream_content_diff()
-    if not diff_body:
-        return None
-    message = memory.build_dream_commit_message(
-        "dream: periodic memory consolidation",
-        diff_body,
-    )
-    return memory.git.auto_commit(message)
-
-
 _HEARTBEAT_PREAMBLE = (
     "[Your response will be delivered directly to the user's messaging app. "
     "Output ONLY the final user-facing message. Never reference internal "
@@ -562,66 +542,6 @@ def _run_gateway(
         async def _silent(*_args: Any, **_kwargs: Any) -> None:
             pass
 
-        # Dream is an internal job — run directly, not through the agent loop.
-        if job.name == "dream":
-            from nanobot.agent.memory import MemoryStore
-
-            dream_session_key = MemoryStore.dream_session_key
-            prune_dream_sessions = MemoryStore.prune_dream_sessions
-
-            store = agent.context.memory
-            resp = None
-            diff_body = ""
-            try:
-                result = store.build_dream_prompt()
-                if result is None:
-                    logger.info("Dream: nothing to process")
-                    return None
-                prompt, last_cursor = result
-                key = dream_session_key()
-                dream_runtime = agent.dream_runtime()
-                await mcp_provider.connect()
-                resp = await agent.process_direct(
-                    prompt,
-                    session_key=key,
-                    ephemeral=True,
-                    tools=store.build_dream_tools(),
-                    on_progress=_silent,
-                    runtime=dream_runtime,
-                )
-                # The real file delta grounds the audit record; normal completion
-                # decides whether this history batch has finished processing.
-                diff_body = store.dream_content_diff()
-                completed = MemoryStore.dream_run_completed(resp)
-                if completed:
-                    store.set_last_dream_cursor(last_cursor)
-                    if diff_body:
-                        logger.info(
-                            "Dream cron job completed, cursor advanced to {}",
-                            last_cursor,
-                        )
-                    else:
-                        logger.info(
-                            "Dream cron job completed with no memory changes; "
-                            "cursor advanced to {}",
-                            last_cursor,
-                        )
-                else:
-                    logger.warning(
-                        "Dream cron job did not complete ({}); cursor remains at {}",
-                        MemoryStore.dream_incompletion_reason(resp),
-                        store.get_last_dream_cursor(),
-                    )
-            except Exception:
-                logger.exception("Dream cron job failed")
-            finally:
-                sha = _commit_dream_changes(store)
-                if sha:
-                    logger.info("Dream commit: {}", sha)
-                store.compact_history()
-                prune_dream_sessions(agent.sessions)
-            return None
-
         # Heartbeat is a system job that checks HEARTBEAT.md for active tasks.
         if job.name == "heartbeat":
             heartbeat_file = config.workspace_path / "HEARTBEAT.md"
@@ -818,22 +738,16 @@ def _run_gateway(
         _print_gateway_health_endpoint(host, health_port)
         async with server:
             await server.serve_forever()
-    # Register Dream system job (idempotent on restart)
     from nanobot.cron.types import CronJob, CronPayload, CronSchedule
-    dream_cfg = config.agents.defaults.dream
-    if dream_cfg.enabled:
-        cron.register_system_job(CronJob(
-            id="dream",
-            name="dream",
-            schedule=dream_cfg.build_schedule(config.agents.defaults.timezone),
-            payload=CronPayload(kind="system_event"),
-        ))
-        console.print(f"[green]✓[/green] Dream: {dream_cfg.describe_schedule()}")
-    else:
-        console.print("[yellow]○[/yellow] Dream: disabled")
-        # Cursor repair must not depend on a healthy cron store.
-        _advance_dream_cursor_if_behind(agent.context.memory)
-        cron.remove_system_job("dream")
+
+    # Memory is observed as conversations grow; the Dream job it replaced goes away.
+    cron.remove_system_job("dream")
+    memory_cfg = config.agents.defaults.memory
+    console.print(
+        "[green]✓[/green] Memory: observes every "
+        f"{memory_cfg.message_tokens:,} tokens"
+        + (f" with preset {memory_cfg.model_override}" if memory_cfg.model_override else "")
+    )
 
     # Register Heartbeat system job (idempotent on restart)
     if hb_cfg.enabled:

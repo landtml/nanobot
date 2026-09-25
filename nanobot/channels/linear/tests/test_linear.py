@@ -1225,7 +1225,7 @@ async def test_compaction_uses_temporary_progress_and_a_persistent_outcome(
     assert len({activity["activity_id"] for activity in client.activities}) == len(client.activities)
 
 
-async def test_idle_compaction_does_not_reactivate_a_completed_agent_session(tmp_path: Path) -> None:
+async def test_out_of_turn_compaction_does_not_reactivate_a_completed_agent_session(tmp_path: Path) -> None:
     channel, client = _runtime(tmp_path)
     await channel._process_webhook("delivery-1", _agent_webhook())  # pyright: ignore[reportPrivateUsage]
     inbound = await channel.bus.consume_inbound()

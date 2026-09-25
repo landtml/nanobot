@@ -174,7 +174,7 @@ def test_get_history_omits_persisted_summary_marker_after_reload(tmp_path):
     session = manager.get_or_create("cli:compacted")
     session.add_message("user", "finish the task")
     session.add_message("assistant", "done")
-    session.commit_summary_checkpoint("The task is complete.")
+    session.commit_summary_checkpoint()
     manager.save(session)
     manager.invalidate(session.key)
 

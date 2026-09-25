@@ -1,6 +1,6 @@
 # Deployment
 
-Use this page after `nanobot agent -m "Hello!"` works locally. Deployment keeps long-running surfaces online: WebUI, chat apps, heartbeat, Dream, cron jobs, and channel connections.
+Use this page after `nanobot agent -m "Hello!"` works locally. Deployment keeps long-running surfaces online: WebUI, chat apps, heartbeat, cron jobs, and channel connections.
 
 ## Before You Deploy
 

@@ -621,10 +621,11 @@ Do not expose exported snapshots directly to chat users.
 
 | Method | Description |
 |--------|-------------|
-| `read()` | Read `memory/MEMORY.md`. |
-| `write(text)` | Overwrite `memory/MEMORY.md`. |
-| `append_history(text, session_key=None)` | Append one `memory/history.jsonl` entry and return its cursor. |
-| `read_history(session_key=None)` | Read memory history entries, optionally filtered by session key. |
+| `read()` | Read the observation log (`memory/observations.md`). |
+| `write(text)` | Replace the observation log; the change is versioned like any other. |
+| `status(session_key=None)` | Token counts, thresholds, observed conversations and reflections, as a `MemoryStatus`. |
+| `await observe(session_key)` | Observe one session now; returns `True` when its messages were folded into memory. |
+| `await reflect(guidance=None)` | Condense the observation log now, optionally steered by `guidance`. |
 
 ### `bot.runtime`
 
@@ -634,8 +635,7 @@ Do not expose exported snapshots directly to chat users.
 | `workspace` | Current runtime workspace path. |
 | `add_context_provider(provider)` | Register an async per-turn context provider and return an unsubscribe callback. |
 | `on_session_turn_persisted(handler)` | Register a best-effort sync or async callback for locally persisted turns and return an unsubscribe callback. |
-| `await compact_session(session_key)` | Run token-based consolidation for a session. |
-| `await compact_idle_session(session_key, max_suffix=8)` | Run idle-session compaction and return its summary. |
+| `await compact_session(session_key)` | Observe a session now and return its snapshot; observed messages leave model context, the saved history is unchanged. |
 
 ### Host integration context and persisted-turn callbacks
 

@@ -23,6 +23,7 @@ from nanobot.utils.workspace_prompts import initialize_workspace_prompt
 
 if TYPE_CHECKING:
     from nanobot.agent.loop import AgentLoop
+    from nanobot.agent.memory import MemoryStatus
     from nanobot.session.manager import Session
     from nanobot.utils.gitstore import CommitInfo
 
@@ -132,31 +133,25 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         accepts_args=True,
     ),
     BuiltinCommandSpec(
-        "/dream",
-        "Run Dream",
-        "Manually trigger memory consolidation.",
+        "/memory",
+        "Memory",
+        "Show what nanobot remembers; `/memory reflect` condenses memory now.",
         "sparkles",
+        "[reflect]",
+        accepts_args=True,
     ),
     BuiltinCommandSpec(
-        "/dream-log",
-        "Show Dream log",
-        "Show what the last Dream consolidation changed.",
+        "/memory-log",
+        "Memory log",
+        "Show the latest change to memory.",
         "book-open",
         accepts_args=True,
     ),
     BuiltinCommandSpec(
-        "/dream-restore",
+        "/memory-restore",
         "Restore memory",
-        "Revert memory to a previous Dream snapshot.",
+        "Revert memory to an earlier version.",
         "undo-2",
-        accepts_args=True,
-    ),
-    BuiltinCommandSpec(
-        "/dream-prompt",
-        "Dream memory",
-        "Tell Dream how to organize this workspace's memory.",
-        "file-text",
-        "[init]",
         accepts_args=True,
     ),
     BuiltinCommandSpec(
@@ -270,10 +265,7 @@ async def cmd_status(ctx: CommandContext) -> OutboundMessage:
     runtime = ctx.runtime or loop.runtime_for_session(session)
     ctx_est = 0
     with suppress(Exception):
-        ctx_est, _ = loop.consolidator.estimate_session_prompt_tokens(
-            session,
-            runtime=runtime,
-        )
+        ctx_est, _ = loop.estimate_session_prompt_tokens(session, runtime=runtime)
     last_usage = LLMUsage.from_dict(session.metadata.get("_last_usage"))
     if ctx_est <= 0:
         ctx_est = last_usage.input_tokens if last_usage is not None else 0
@@ -316,28 +308,23 @@ async def cmd_new(ctx: CommandContext) -> OutboundMessage:
     await loop._cancel_active_tasks(ctx.key)  # pyright: ignore[reportPrivateUsage]
     loop.discard_session_file_state(ctx.key)
     session = ctx.session or loop.sessions.get_or_create(ctx.key)
-    snapshot = list(session.messages)
-    archive_snapshot = None
-    runtime = None
-    if session.last_archived < len(snapshot):
-        runtime = ctx.runtime or loop.runtime_for_session(session)
-        archive_snapshot = replace(
+    # Observe what memory has not seen yet before the conversation is cleared.
+    archive_snapshot = (
+        replace(
             session,
-            messages=snapshot,
+            messages=list(session.messages),
             metadata=dict(session.metadata),
             provider_state=None,
         )
+        if session.policy.persist and session.last_archived < len(session.messages)
+        else None
+    )
     session.clear()
     loop.sessions.save(session)
     loop.sessions.invalidate(session.key)
-    if archive_snapshot is not None and runtime is not None:
-        loop.schedule_background(
-            loop.consolidator.archive_session(  # pyright: ignore[reportUnknownMemberType]
-                archive_snapshot,
-                archive_end=len(snapshot),
-                runtime=runtime,
-            )
-        )
+    loop.memory.forget_session(session.key)
+    if archive_snapshot is not None:
+        loop.schedule_background(loop.memory.archive(archive_snapshot))
     return OutboundMessage(
         channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
         content="New session started.",
@@ -346,26 +333,34 @@ async def cmd_new(ctx: CommandContext) -> OutboundMessage:
 
 
 async def cmd_compact(ctx: CommandContext) -> None:
-    """Compact the current session without resetting the conversation."""
+    """Observe the current session now and continue from memory."""
+    from uuid import uuid4
+
+    from nanobot.events import ContextCompactionEvent
+
     loop = ctx.loop
     session = ctx.session or loop.sessions.get_or_create(ctx.key)
-    runtime = ctx.runtime or loop.runtime_for_session(session)
+    if loop.memory.pending_thread(session) is None:
+        return  # Nothing new since the last observation.
     delivery = loop.turn_delivery_factory.create(ctx.msg, ctx.key)
-
+    events = delivery.events
+    compaction_id = uuid4().hex
+    await events.emit(ContextCompactionEvent(compaction_id=compaction_id, phase="started"))
     try:
-        summary = await loop.consolidator.compact_idle_session(
-            ctx.key,
-            runtime=runtime,
-            events=delivery.events,
-        )
+        compacted = await loop.memory.compact(session)
+    except asyncio.CancelledError:
+        await events.emit(ContextCompactionEvent(compaction_id=compaction_id, phase="cancelled"))
+        raise
     except Exception:
         logger.exception("Manual context compaction failed for {}", ctx.key)
+        await events.emit(ContextCompactionEvent(compaction_id=compaction_id, phase="failed"))
         return
-
-    if summary:
-        refreshed = loop.sessions.get_or_create(ctx.key)
-        refreshed.provider_state = None
-        loop.sessions.save(refreshed)
+    await events.emit(
+        ContextCompactionEvent(
+            compaction_id=compaction_id,
+            phase="succeeded" if compacted else "failed",
+        )
+    )
 
 
 def _format_preset_names(names: list[str]) -> str:
@@ -448,126 +443,80 @@ async def cmd_model(ctx: CommandContext) -> OutboundMessage:
     )
 
 
-async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
-    """Manually trigger a Dream consolidation run."""
-    import time
+def _format_memory_status(status: MemoryStatus, observations: str) -> str:
+    lines = [
+        "## Memory",
+        "",
+        f"- Observations: {status.observation_tokens:,} tokens "
+        f"(condensed above {status.observation_threshold:,})",
+        f"- Waiting to be observed: {status.pending_tokens:,} tokens "
+        f"(observed at {status.message_threshold:,})",
+        f"- Conversations observed: {status.sessions}",
+        f"- Reflections: {status.generation}",
+    ]
+    if status.last_observed_at:
+        lines.append(f"- Last observed: {status.last_observed_at[:16].replace('T', ' ')}")
+    if status.last_reflected_at:
+        lines.append(f"- Last reflected: {status.last_reflected_at[:16].replace('T', ' ')}")
+    if observations:
+        preview = observations if len(observations) <= _MEMORY_PREVIEW_CHARS else (
+            "…" + observations[-_MEMORY_PREVIEW_CHARS:]
+        )
+        lines.extend(["", "Most recent observations:", "", "```", preview, "```"])
+    else:
+        lines.extend(["", "Nothing observed yet. Observation starts once conversations grow long."])
+    lines.extend([
+        "",
+        "`/memory reflect` condenses memory now. `/memory-log` shows the latest change.",
+    ])
+    return "\n".join(lines)
 
+
+_MEMORY_PREVIEW_CHARS = 3_000
+
+
+async def cmd_memory(ctx: CommandContext) -> OutboundMessage:
+    """Show memory status, or condense it with ``/memory reflect``."""
     loop = ctx.loop
     msg = ctx.msg
-
-    async def _run_dream():
-        from nanobot.agent.memory import MemoryStore
-
-        async def _silent(*_args: Any, **_kwargs: Any) -> None:
-            pass
-
-        dream_session_key = MemoryStore.dream_session_key
-        build_dream_commit_message = MemoryStore.build_dream_commit_message
-        prune_dream_sessions = MemoryStore.prune_dream_sessions
-
-        store = loop.context.memory
-        content = ""
-        resp = None
-        diff_body = ""
-        t0 = time.monotonic()
-        try:
-            result = store.build_dream_prompt()
-            if result is None:
-                await loop.bus.publish_outbound(OutboundMessage(
-                    channel=msg.channel, chat_id=msg.chat_id,
-                    content=_format_dream_no_input_message(),
-                    metadata={"render_as": "text"},
-                ))
-                return
-            prompt, last_cursor = result
-            key = dream_session_key()
-            dream_runtime = loop.dream_runtime()
-            resp = await loop.process_direct(
-                prompt,
-                session_key=key,
-                ephemeral=True,
-                tools=store.build_dream_tools(),
-                on_progress=_silent,
-                runtime=dream_runtime,
-            )
-            elapsed = time.monotonic() - t0
-            # The real file delta grounds the audit record; normal completion
-            # decides whether this history batch has finished processing.
-            diff_body = store.dream_content_diff()
-            completed = MemoryStore.dream_run_completed(resp)
-            if completed:
-                store.set_last_dream_cursor(last_cursor)
-                if diff_body:
-                    content = f"Dream completed in {elapsed:.1f}s."
-                else:
-                    content = f"Dream completed in {elapsed:.1f}s; no memory changes."
-            else:
-                reason = MemoryStore.dream_incompletion_reason(resp)
-                content = (
-                    f"Dream did not complete after {elapsed:.1f}s ({reason}); "
-                    "memory cursor was not advanced."
-                )
-        except Exception as e:
-            elapsed = time.monotonic() - t0
-            content = f"Dream failed after {elapsed:.1f}s: {e}"
-        finally:
-            if store.git.is_initialized():
-                commit_msg = build_dream_commit_message("dream: manual run", diff_body)
-                sha = store.git.auto_commit(commit_msg)
-                if sha:
-                    content += f" (commit {sha})"
-            store.compact_history()
-            prune_dream_sessions(loop.sessions)
-        await loop.bus.publish_outbound(OutboundMessage(
-            channel=msg.channel, chat_id=msg.chat_id, content=content,
-        ))
-
-    asyncio.create_task(_run_dream())
-    return OutboundMessage(
-        channel=msg.channel, chat_id=msg.chat_id, content="Dreaming...",
-    )
-
-
-async def cmd_dream_prompt(ctx: CommandContext) -> OutboundMessage:
-    """Show or set up the workspace Dream memory instructions."""
-    store = ctx.loop.context.memory
-    path = store.dream_prompt_file
-    display_path = path.relative_to(store.workspace).as_posix()
     args = ctx.args.strip().lower()
+    metadata = {**dict(msg.metadata or {}), "render_as": "text"}
+    if args == "reflect":
+        async def _reflect() -> None:
+            started = time.monotonic()
+            try:
+                reflected = await loop.memory.reflect()
+            except Exception as exc:
+                logger.exception("Manual memory reflection failed")
+                content = f"Reflection failed: {exc}"
+            else:
+                elapsed = time.monotonic() - started
+                content = (
+                    f"Memory condensed in {elapsed:.1f}s."
+                    if reflected
+                    else "Nothing to condense yet."
+                )
+            await loop.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=metadata,
+            ))
 
-    if args == "init":
-        if not initialize_workspace_prompt(path, store.default_dream_prompt()):
-            content = (
-                f"Dream memory instructions already exist at `{display_path}`.\n\n"
-                "Edit that file, or delete/empty it to return to nanobot's default."
-            )
-        else:
-            content = (
-                f"Created Dream memory instructions at `{display_path}`.\n\n"
-                "Edit that file to teach Dream how to organize memory. "
-                "This fully replaces nanobot's default Dream guide for this workspace. "
-                "Delete or empty it to return to nanobot's default."
-            )
-    elif args:
-        content = "Usage: /dream-prompt [init]"
-    elif store.has_dream_prompt_override():
-        content = (
-            "Dream memory instructions: custom for this workspace\n\n"
-            f"- Path: `{display_path}`\n"
-            "- Delete or empty this file to return to nanobot's default."
+        loop.schedule_background(_reflect())
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id, content="Reflecting on memory...",
+            metadata=metadata,
         )
-    else:
-        content = (
-            "Dream memory instructions: nanobot default\n\n"
-            f"- Editable file: `{display_path}`\n"
-            "- Run `/dream-prompt init` to create an editable copy."
+    if args:
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id, content="Usage: /memory [reflect]",
+            metadata=metadata,
         )
-
+    session = ctx.session or loop.sessions.get_or_create(ctx.key)
+    status = await asyncio.to_thread(loop.memory.status, session)
     return OutboundMessage(
-        channel=ctx.msg.channel,
-        chat_id=ctx.msg.chat_id,
-        content=content,
-        metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
+        channel=msg.channel,
+        chat_id=msg.chat_id,
+        content=_format_memory_status(status, loop.memory.observations()),
+        metadata=metadata,
     )
 
 
@@ -579,7 +528,7 @@ async def cmd_evaluator_prompt(ctx: CommandContext) -> OutboundMessage:
         has_evaluator_prompt_override,
     )
 
-    workspace = ctx.loop.context.memory.workspace
+    workspace = ctx.loop.workspace
     path = evaluator_prompt_file(workspace)
     display_path = path.relative_to(workspace).as_posix()
     args = ctx.args.strip().lower()
@@ -621,24 +570,6 @@ async def cmd_evaluator_prompt(ctx: CommandContext) -> OutboundMessage:
     )
 
 
-def _format_dream_no_input_message() -> str:
-    return "\n".join([
-        "Dream has no conversation history to process yet.",
-        "",
-        "Dream reads new entries from `memory/history.jsonl` after the current Dream cursor.",
-        (
-            "Short chats only reach that file after token compaction or idle auto-compact, "
-            "so a fresh or short WebUI chat may leave Dream with no input."
-        ),
-        "",
-        "Next steps:",
-        "- Enable `agents.defaults.idleCompactAfterMinutes` so completed chats become Dream input automatically.",
-        "- Compact the current chat into memory once that manual action is available.",
-        "- If you expected history to exist, check whether `memory/history.jsonl` has new entries after the Dream cursor.",
-        "- Use `/dream-prompt` to see or change how Dream organizes memory.",
-    ])
-
-
 def _extract_changed_files(diff: str) -> list[str]:
     """Extract changed file paths from a unified diff."""
     files: list[str] = []
@@ -666,10 +597,7 @@ def _format_changed_files(diff: str) -> str:
     return ", ".join(f"`{path}`" for path in files)
 
 
-_DREAM_COMMIT_PREFIX = "dream:"
-
-
-def _format_dream_log_content(
+def _format_memory_log_content(
     commit: CommitInfo,
     diff: str,
     *,
@@ -677,158 +605,124 @@ def _format_dream_log_content(
 ) -> str:
     files_line = _format_changed_files(diff)
     lines = [
-        "## Dream Update",
+        "## Memory Update",
         "",
-        "Here is the selected Dream memory change." if requested_sha else "Here is the latest Dream memory change.",
+        "Here is the selected memory change." if requested_sha else "Here is the latest memory change.",
         "",
         f"- Commit: `{commit.sha}`",
         f"- Time: {commit.timestamp}",
+        f"- Change: {commit.subject()}",
         f"- Changed files: {files_line}",
     ]
     if diff:
         lines.extend([
             "",
-            f"Use `/dream-restore {commit.sha}` to undo this change.",
+            f"Use `/memory-restore {commit.sha}` to undo this change.",
             "",
             "```diff",
             diff.rstrip(),
             "```",
         ])
     else:
-        lines.extend([
-            "",
-            "Dream recorded this version, but there is no file diff to display.",
-        ])
+        lines.extend(["", "This version has no file diff to display."])
     return "\n".join(lines)
 
 
-def _format_dream_restore_list(commits: list[CommitInfo]) -> str:
+def _format_memory_restore_list(commits: list[CommitInfo]) -> str:
     lines = [
-        "## Dream Restore",
+        "## Memory Restore",
         "",
-        "Choose a Dream memory version to restore. Latest first:",
+        "Choose a memory version to restore. Latest first:",
         "",
     ]
     for c in commits:
         lines.append(f"- `{c.sha}` {c.timestamp} - {c.subject()}")
     lines.extend([
         "",
-        "Preview a version with `/dream-log <sha>` before restoring it.",
-        "Restore a version with `/dream-restore <sha>`.",
+        "Preview a version with `/memory-log <sha>` before restoring it.",
+        "Restore a version with `/memory-restore <sha>`.",
     ])
     return "\n".join(lines)
 
 
-async def cmd_dream_log(ctx: CommandContext) -> OutboundMessage:
-    """Show what the last Dream changed.
+_MEMORY_UNVERSIONED = "Memory history is not available because memory versioning is not initialized."
 
-    Default: diff of the latest Dream commit versus its parent.
-    With /dream-log <sha>: diff of that specific commit.
-    """
-    store = ctx.loop.consolidator.store
-    git = store.git
 
-    if not git.is_initialized():
-        if store.get_last_dream_cursor() == 0:
-            msg = (
-                "Dream has not run yet. Run `/dream`, or wait for the next scheduled Dream cycle.\n\n"
-                "Use `/dream-prompt` to see or change how Dream organizes memory."
-            )
-        else:
-            msg = "Dream history is not available because memory versioning is not initialized."
-        return OutboundMessage(
-            channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
-            content=msg, metadata={"render_as": "text"},
-        )
+async def cmd_memory_log(ctx: CommandContext) -> OutboundMessage:
+    """Show the latest memory change, or a specific one with ``/memory-log <sha>``."""
+    from nanobot.agent.memory import MEMORY_COMMIT_PREFIX
 
+    git = ctx.loop.memory.git
     args = ctx.args.strip()
-
-    if args:
-        # Show diff of a specific commit
+    if not git.is_initialized():
+        content = _MEMORY_UNVERSIONED
+    elif args:
         sha = args.split()[0]
         result = git.show_commit_diff(sha)
         if not result:
             content = (
-                f"Couldn't find Dream change `{sha}`.\n\n"
-                "Use `/dream-restore` to list recent versions, "
-                "or `/dream-log` to inspect the latest one."
+                f"Couldn't find memory change `{sha}`.\n\n"
+                "Use `/memory-restore` to list recent versions, "
+                "or `/memory-log` to inspect the latest one."
             )
         else:
             commit, diff = result
-            content = _format_dream_log_content(commit, diff, requested_sha=sha)
+            content = _format_memory_log_content(commit, diff, requested_sha=sha)
     else:
-        # Default: show the latest Dream commit's diff
-        commits = git.log(max_entries=1, message_prefix=_DREAM_COMMIT_PREFIX)
+        commits = git.log(max_entries=1, message_prefix=MEMORY_COMMIT_PREFIX)
         result = (
             git.show_commit_diff(
-                commits[0].sha,
-                max_entries=1,
-                message_prefix=_DREAM_COMMIT_PREFIX,
+                commits[0].sha, max_entries=1, message_prefix=MEMORY_COMMIT_PREFIX,
             )
             if commits else None
         )
         if result:
             commit, diff = result
-            content = _format_dream_log_content(commit, diff)
+            content = _format_memory_log_content(commit, diff)
         else:
-            content = (
-                "Dream memory has no saved versions yet.\n\n"
-                "Use `/dream-prompt` to see or change how Dream organizes memory."
-            )
-
+            content = "Memory has no saved versions yet. They appear once conversations are observed."
     return OutboundMessage(
         channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
         content=content, metadata={"render_as": "text"},
     )
 
 
-async def cmd_dream_restore(ctx: CommandContext) -> OutboundMessage:
-    """Restore memory files from a previous dream commit.
+async def cmd_memory_restore(ctx: CommandContext) -> OutboundMessage:
+    """List memory versions, or revert one with ``/memory-restore <sha>``."""
+    from nanobot.agent.memory import MEMORY_COMMIT_PREFIX
 
-    Usage:
-        /dream-restore          — list recent commits
-        /dream-restore <sha>    — revert a specific commit
-    """
-    store = ctx.loop.consolidator.store
-    git = store.git
-    if not git.is_initialized():
-        return OutboundMessage(
-            channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
-            content="Dream history is not available because memory versioning is not initialized.",
-        )
-
+    git = ctx.loop.memory.git
     args = ctx.args.strip()
-    if not args:
-        # Show recent Dream commits for the user to pick
-        commits = git.log(max_entries=10, message_prefix=_DREAM_COMMIT_PREFIX)
-        if not commits:
-            content = "Dream memory has no saved versions to restore yet."
-        else:
-            content = _format_dream_restore_list(commits)
+    if not git.is_initialized():
+        content = _MEMORY_UNVERSIONED
+    elif not args:
+        commits = git.log(max_entries=10, message_prefix=MEMORY_COMMIT_PREFIX)
+        content = (
+            _format_memory_restore_list(commits)
+            if commits
+            else "Memory has no saved versions to restore yet."
+        )
     else:
         sha = args.split()[0]
-        result = git.show_commit_diff(sha, message_prefix=_DREAM_COMMIT_PREFIX)
+        result = git.show_commit_diff(sha, message_prefix=MEMORY_COMMIT_PREFIX)
         if not result:
             content = (
-                f"Couldn't restore Dream change `{sha}`.\n\n"
-                "Only Dream memory versions can be restored. "
-                "Use `/dream-restore` to list recent versions."
+                f"Couldn't restore memory change `{sha}`.\n\n"
+                "Only memory versions can be restored. "
+                "Use `/memory-restore` to list recent versions."
             )
         else:
             changed_files = _format_changed_files(result[1])
-            new_sha = git.revert(sha, message_prefix=_DREAM_COMMIT_PREFIX)
-            if new_sha:
-                content = (
-                    f"Restored Dream memory to the state before `{sha}`.\n\n"
-                    f"- New safety commit: `{new_sha}`\n"
-                    f"- Restored files: {changed_files}\n\n"
-                    f"Use `/dream-log {new_sha}` to inspect the restore diff."
-                )
-            else:
-                content = (
-                    f"Couldn't restore Dream change `{sha}`.\n\n"
-                    "It may be the first saved version with no earlier state to restore."
-                )
+            new_sha = ctx.loop.memory.restore_version(sha)
+            content = (
+                f"Restored memory to the state before `{sha}`.\n\n"
+                f"- New safety commit: `{new_sha}`\n"
+                f"- Restored files: {changed_files}\n\n"
+                f"Use `/memory-log {new_sha}` to inspect the restore diff."
+                if new_sha
+                else f"Couldn't restore memory change `{sha}`.\n\n"
+                "It may be the first saved version with no earlier state to restore."
+            )
     return OutboundMessage(
         channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
         content=content, metadata={"render_as": "text"},
@@ -1085,13 +979,12 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.prefix("/goal ", cmd_goal)
     router.exact("/trigger", cmd_trigger)
     router.prefix("/trigger ", cmd_trigger)
-    router.exact("/dream", cmd_dream)
-    router.exact("/dream-log", cmd_dream_log)
-    router.prefix("/dream-log ", cmd_dream_log)
-    router.exact("/dream-restore", cmd_dream_restore)
-    router.prefix("/dream-restore ", cmd_dream_restore)
-    router.exact("/dream-prompt", cmd_dream_prompt)
-    router.prefix("/dream-prompt ", cmd_dream_prompt)
+    router.exact("/memory", cmd_memory)
+    router.prefix("/memory ", cmd_memory)
+    router.exact("/memory-log", cmd_memory_log)
+    router.prefix("/memory-log ", cmd_memory_log)
+    router.exact("/memory-restore", cmd_memory_restore)
+    router.prefix("/memory-restore ", cmd_memory_restore)
     router.exact("/evaluator-prompt", cmd_evaluator_prompt)
     router.prefix("/evaluator-prompt ", cmd_evaluator_prompt)
     router.exact("/skill", cmd_skill)

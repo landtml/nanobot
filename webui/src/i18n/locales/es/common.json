@@ -138,7 +138,8 @@
       "fields": {
         "agents_defaults_timezone_mode": {"label": "Usar la zona horaria del sistema", "help": "Desactiva esta opción para elegir la zona horaria manualmente."},
         "agents_defaults_timezone": {"label": "Zona horaria", "help": "Elige una zona horaria. La diferencia con UTC corresponde a la fecha actual."},
-        "agents_defaults_dream_enabled": {"label": "Consolidación de memoria", "help": "Organiza la información útil de las conversaciones. La memoria existente sigue disponible al desactivarla."},
+        "agents_defaults_memory_message_tokens": {"label": "Observar tras (tokens)", "help": "Tokens de conversación sin observar que activan una observación. Predeterminado: 30.000."},
+        "agents_defaults_memory_observation_tokens": {"label": "Condensar memoria por encima de (tokens)", "help": "Tamaño del registro de observaciones que activa la reflexión. Predeterminado: 40.000."},
         "gateway_heartbeat_enabled": {"label": "Comprobación periódica", "help": "Busca tareas periódicamente en HEARTBEAT.md."},
         "gateway_heartbeat_interval_s": {"label": "Intervalo de comprobación (segundos)", "help": "La gateway programa las comprobaciones al iniciarse."},
         "agents_defaults_max_tool_iterations": {"label": "Iteraciones de herramientas por turno", "help": "Máximo de intercambios entre el modelo y las herramientas en un turno."},
@@ -181,7 +182,7 @@
       "groups": {
         "chat": {"title": "Permisos de chat WebUI", "help": "Acceso a servicios locales y permisos predeterminados de chat."},
         "identity": {"title": "Zona horaria", "help": "Elige la zona horaria de las tareas programadas."},
-        "memory": {"title": "Memoria", "help": "Activa o desactiva la consolidación automática de memoria."},
+        "memory": {"title": "Memoria", "help": "La memoria observacional convierte las conversaciones largas en observaciones fechadas compartidas entre chats."},
         "heartbeat": {"title": "Comprobaciones periódicas", "help": "Configura la comprobación periódica integrada de tareas."},
         "execution": {"title": "Límites del agente", "help": "Ejecución de herramientas y reintentos."},
         "sessions": {"title": "Conversaciones", "help": "Comparte conversaciones entre plataformas."},
@@ -504,7 +505,7 @@
         "user": "Chat",
         "api": "API",
         "cron": "Automatizaciones",
-        "dream": "Consolidación de memoria",
+        "memory": "Consolidación de memoria",
         "system": "Llamadas auxiliares"
       }
     },
@@ -1529,21 +1530,17 @@
             "title": "Mostrar historial",
             "description": "Imprime los últimos N mensajes persistidos de la conversación."
           },
-          "dream": {
-            "title": "Ejecutar Dream",
-            "description": "Activa manualmente la consolidación de memoria."
+          "memory": {
+            "title": "Memoria",
+            "description": "Muestra lo que nanobot recuerda; `/memory reflect` condensa la memoria ahora."
           },
-          "dream_log": {
-            "title": "Mostrar registro de Dream",
-            "description": "Muestra qué cambió la última consolidación Dream."
+          "memory_log": {
+            "title": "Registro de memoria",
+            "description": "Muestra el último cambio en la memoria."
           },
-          "dream_restore": {
+          "memory_restore": {
             "title": "Restaurar memoria",
-            "description": "Revierte la memoria a una instantánea Dream anterior."
-          },
-          "dream_prompt": {
-            "title": "Memoria de Dream",
-            "description": "Indica a Dream cómo organizar la memoria de este espacio de trabajo."
+            "description": "Revierte la memoria a una versión anterior."
           },
           "goal": {
             "title": "Objetivo a largo plazo",

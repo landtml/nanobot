@@ -421,8 +421,8 @@ def _make_loop(tmp_path, hooks=None, hook_factories=None):
 
     with patch("nanobot.agent.loop.ContextBuilder"), \
          patch("nanobot.agent.loop.SessionManager"), \
-         patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr, \
-         patch("nanobot.agent.loop.Consolidator"):
+         patch("nanobot.agent.loop.Memory", autospec=True), \
+         patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
         mock_sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
         loop = AgentLoop(
             bus=bus,

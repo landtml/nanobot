@@ -11,7 +11,8 @@ function runtimeSettings() {
     "agents.defaults.bot_icon": "🐈",
     "agents.defaults.timezone_mode": "auto",
     "agents.defaults.timezone": "UTC",
-    "agents.defaults.dream.enabled": true,
+    "agents.defaults.memory.message_tokens": 30000,
+    "agents.defaults.memory.observation_tokens": 40000,
     "gateway.heartbeat.enabled": true,
     "tools.exec.timeout": 60,
     "tools.exec.allowed_env_keys": ["TERM"],
@@ -55,15 +56,21 @@ describe("Runtime configuration settings", () => {
     expect(screen.getByRole("switch", { name: "Web access" })).toBeInTheDocument();
   });
 
-  it("offers only the memory consolidation switch and saves only dream.enabled", async () => {
+  it("offers the memory thresholds and saves only the edited one", async () => {
     const payload = runtimeSettings();
-    requestMutationMock.mockResolvedValue({ ...payload, runtime_config: { ...payload.runtime_config, "agents.defaults.dream.enabled": false } });
+    requestMutationMock.mockResolvedValue({ ...payload, runtime_config: {
+      ...payload.runtime_config, "agents.defaults.memory.message_tokens": 20000,
+    } });
     renderSettingsView({ initialSection: "memory", initialSettings: payload });
-    const memory = within(screen.getByRole("region", { name: "Memory consolidation" }));
-    expect(memory.getAllByRole("switch")).toHaveLength(1);
-    fireEvent.click(screen.getByRole("switch", { name: "Memory consolidation" }));
-    await waitFor(() => expect(requestMutationMock).toHaveBeenCalledWith("settings.runtime_config.update", { values: { "agents.defaults.dream.enabled": false } }, 20_000));
-    await waitFor(() => expect(screen.getByRole("switch", { name: "Memory consolidation" })).not.toBeChecked());
+    // Memory is always on: its row opens the thresholds but has no switch.
+    expect(screen.queryByRole("switch", { name: "Memory" })).not.toBeInTheDocument();
+    expect(screen.getByRole("spinbutton", { name: "Condense memory above (tokens)" })).toHaveValue(40000);
+    const observeAfter = screen.getByRole("spinbutton", { name: "Observe after (tokens)" });
+    expect(observeAfter).toHaveValue(30000);
+    fireEvent.change(observeAfter, { target: { value: "20000" } });
+    await waitFor(() => expect(requestMutationMock).toHaveBeenCalledWith(
+      "settings.runtime_config.update", { values: { "agents.defaults.memory.message_tokens": 20000 } }, 20_000,
+    ));
   });
 
   it("explains unavailable memory settings instead of rendering a blank page", () => {

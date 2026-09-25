@@ -753,8 +753,10 @@ export interface SettingsPayload {
       enabled: boolean;
       interval_s: number;
     };
-    dream: {
-      schedule: string;
+    memory: {
+      message_tokens: number;
+      observation_tokens: number;
+      model_override: string | null;
     };
     unified_session: boolean;
   };
@@ -781,7 +783,7 @@ export interface SettingsPayload {
       timed_requests?: number;
       duration_ms?: number;
       sources?: Record<
-        "user" | "api" | "cron" | "dream" | "system" | string,
+        "user" | "api" | "cron" | "memory" | "system" | string,
         {
           input_tokens: number;
           output_tokens: number;

@@ -1,4 +1,4 @@
-"""Test /new archival behavior."""
+"""``/new``: the session clears at once and memory observes what it had not seen."""
 
 import asyncio
 from collections.abc import Coroutine
@@ -8,172 +8,119 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nanobot.utils.prompt_templates import render_template
+from nanobot.agent.loop import AgentLoop
+from nanobot.bus.events import InboundMessage
+from nanobot.bus.queue import MessageBus
+from nanobot.providers.base import GenerationSettings, LLMResponse
 
-_ARCHIVE_PROMPT = render_template("agent/consolidator_archive.md", strip=True)
+OBSERVED = (
+    "<observations>\nDate: Sep 25, 2026\n* 🔴 (10:00) User discussed msg4\n</observations>\n"
+    "<current-task>\nPrimary: answer msg4\n</current-task>"
+)
 
 
-class TestNewCommandArchival:
-    """Test /new archival behavior with the structured archive flow."""
+def _make_loop(tmp_path: Path) -> AgentLoop:
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    provider.estimate_prompt_tokens.return_value = (10_000, "test")
+    provider.generation = GenerationSettings(max_tokens=100)
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        model="test-model",
+        context_window_tokens=128_000,
+    )
+    loop.provider.chat_stream_with_retry = AsyncMock(
+        return_value=LLMResponse(content=OBSERVED, tool_calls=[])
+    )
+    loop.tools.get_definitions = MagicMock(return_value=[])
+    return loop
 
-    @staticmethod
-    def _make_loop(tmp_path: Path):
-        from nanobot.agent.loop import AgentLoop
-        from nanobot.bus.queue import MessageBus
-        from nanobot.providers.base import GenerationSettings, LLMResponse
 
-        bus = MessageBus()
-        provider = MagicMock()
-        provider.get_default_model.return_value = "test-model"
-        provider.estimate_prompt_tokens.return_value = (10_000, "test")
-        provider.generation = GenerationSettings(max_tokens=100)
-        loop = AgentLoop(
-            bus=bus,
-            provider=provider,
-            workspace=tmp_path,
-            model="test-model",
-            context_window_tokens=1,
-        )
-        loop.provider.chat_stream_with_retry = AsyncMock(
-            return_value=LLMResponse(content="ok", tool_calls=[])
-        )
-        loop.tools.get_definitions = MagicMock(return_value=[])
-        return loop
+def _conversation(loop: AgentLoop, turns: int):
+    session = loop.sessions.get_or_create("cli:test")
+    for i in range(turns):
+        session.add_message("user", f"msg{i}")
+        session.add_message("assistant", f"resp{i}")
+    loop.sessions.save(session)
+    return session
 
-    @pytest.mark.asyncio
-    async def test_new_clears_session_immediately_even_if_archive_fails(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """/new clears session immediately; archive is fire-and-forget."""
-        from nanobot.bus.events import InboundMessage
 
-        loop = self._make_loop(tmp_path)
-        session = loop.sessions.get_or_create("cli:test")
-        for i in range(5):
-            session.add_message("user", f"msg{i}")
-            session.add_message("assistant", f"resp{i}")
-        loop.sessions.save(session)
+NEW = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
 
-        call_count = 0
-        expected_runtime = loop.llm_runtime()
 
-        async def _failing_summarize(session, *, archive_end, runtime) -> None:
-            nonlocal call_count
-            assert runtime is expected_runtime
-            assert session.key == "cli:test"
-            assert archive_end == len(session.messages)
-            call_count += 1
+@pytest.mark.asyncio
+async def test_new_clears_session_immediately_even_if_observation_fails(tmp_path: Path) -> None:
+    loop = _make_loop(tmp_path)
+    _conversation(loop, 5)
+    loop.provider.chat_stream_with_retry = AsyncMock(
+        return_value=LLMResponse(content="boom", finish_reason="error")
+    )
 
-        loop.consolidator.archive_session = _failing_summarize  # type: ignore[method-assign]
+    response = await loop._process_message(NEW, runtime=loop.llm_runtime())
 
-        new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
-        response = await loop._process_message(new_msg, runtime=expected_runtime)
+    assert response is not None
+    assert "new session started" in response.content.lower()
+    assert loop.sessions.get_or_create("cli:test").messages == []
+    await loop.aclose()
+    assert loop.memory.observations() == ""
 
-        assert response is not None
-        assert "new session started" in response.content.lower()
 
-        session_after = loop.sessions.get_or_create("cli:test")
-        assert len(session_after.messages) == 0
+@pytest.mark.asyncio
+async def test_new_observes_only_unobserved_messages(tmp_path: Path) -> None:
+    loop = _make_loop(tmp_path)
+    session = _conversation(loop, 5)
+    session.last_archived = len(session.messages) - 2
+    loop.sessions.save(session)
+    scheduled: list[Coroutine[Any, Any, object]] = []
+    loop.schedule_background = scheduled.append  # type: ignore[method-assign]
 
-        await loop.aclose()
-        assert call_count == 1
+    response = await loop._process_message(NEW, runtime=loop.llm_runtime())
 
-    @pytest.mark.asyncio
-    async def test_new_reuses_replay_prefix_and_archives_only_unarchived_messages(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        from nanobot.bus.events import InboundMessage
+    assert response is not None
+    assert len(scheduled) == 1
+    await scheduled[0]
+    prompt = loop.provider.chat_stream_with_retry.call_args.kwargs["messages"][1]["content"]
+    assert "msg4" in prompt and "resp4" in prompt
+    assert "msg3" not in prompt
+    assert "User discussed msg4" in loop.memory.observations()
+    # The finished conversation leaves no stale task behind for the next one.
+    assert loop.memory.om.thread_state("cli:test") is None
 
-        loop = self._make_loop(tmp_path)
-        loop.set_runtime_context_window(128_000)
-        session = loop.sessions.get_or_create("cli:test")
-        for i in range(5):
-            session.add_message("user", f"msg{i}")
-            session.add_message("assistant", f"resp{i}")
-        session.last_archived = len(session.messages) - 2
-        ordinary_history = session.get_history()
-        assert [message["content"] for message in ordinary_history] == [
-            "msg4",
-            "resp4",
-        ]
-        loop.sessions.save(session)
 
-        expected_runtime = loop.llm_runtime()
-        scheduled: list[Coroutine[Any, Any, object]] = []
-        loop.schedule_background = scheduled.append  # type: ignore[method-assign]
+@pytest.mark.asyncio
+async def test_new_on_fully_observed_session_schedules_nothing(tmp_path: Path) -> None:
+    loop = _make_loop(tmp_path)
+    session = _conversation(loop, 2)
+    session.last_archived = len(session.messages)
+    loop.sessions.save(session)
+    scheduled: list[Coroutine[Any, Any, object]] = []
+    loop.schedule_background = scheduled.append  # type: ignore[method-assign]
 
-        new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
-        response = await loop._process_message(new_msg, runtime=expected_runtime)
+    await loop._process_message(NEW, runtime=loop.llm_runtime())
 
-        assert response is not None
-        assert "new session started" in response.content.lower()
+    assert scheduled == []
+    assert loop.sessions.get_or_create("cli:test").messages == []
 
-        assert len(scheduled) == 1
-        await scheduled[0]
-        await loop.aclose()
-        sent = loop.provider.chat_stream_with_retry.call_args.kwargs["messages"]
-        assert sent[1:-1] == ordinary_history
-        assert sent[-1]["content"] == _ARCHIVE_PROMPT
 
-    @pytest.mark.asyncio
-    async def test_new_clears_session_and_responds(self, tmp_path: Path) -> None:
-        from nanobot.bus.events import InboundMessage
+@pytest.mark.asyncio
+async def test_aclose_drains_background_observation(tmp_path: Path) -> None:
+    loop = _make_loop(tmp_path)
+    _conversation(loop, 3)
+    release = asyncio.Event()
+    observed = asyncio.Event()
 
-        loop = self._make_loop(tmp_path)
-        session = loop.sessions.get_or_create("cli:test")
-        for i in range(3):
-            session.add_message("user", f"msg{i}")
-            session.add_message("assistant", f"resp{i}")
-        loop.sessions.save(session)
-        expected_runtime = loop.llm_runtime()
+    async def slow_observer(**_kwargs: Any) -> LLMResponse:
+        await release.wait()
+        observed.set()
+        return LLMResponse(content=OBSERVED)
 
-        async def _ok_summarize(session, *, archive_end, runtime) -> str:
-            assert runtime is expected_runtime
-            assert session.key == "cli:test"
-            assert archive_end == len(session.messages)
-            return "Summary."
+    loop.provider.chat_stream_with_retry = slow_observer
+    await loop._process_message(NEW, runtime=loop.llm_runtime())
 
-        loop.consolidator.archive_session = _ok_summarize  # type: ignore[method-assign]
-
-        new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
-        response = await loop._process_message(new_msg, runtime=expected_runtime)
-
-        assert response is not None
-        assert "new session started" in response.content.lower()
-        assert loop.sessions.get_or_create("cli:test").messages == []
-
-    @pytest.mark.asyncio
-    async def test_aclose_drains_background_tasks(self, tmp_path: Path) -> None:
-        """aclose waits for background tasks to complete."""
-        from nanobot.bus.events import InboundMessage
-
-        loop = self._make_loop(tmp_path)
-        session = loop.sessions.get_or_create("cli:test")
-        for i in range(3):
-            session.add_message("user", f"msg{i}")
-            session.add_message("assistant", f"resp{i}")
-        loop.sessions.save(session)
-
-        archived = asyncio.Event()
-        release_archive = asyncio.Event()
-        expected_runtime = loop.llm_runtime()
-
-        async def _slow_summarize(session, *, archive_end, runtime) -> str:
-            assert runtime is expected_runtime
-            assert session.key == "cli:test"
-            assert archive_end == len(session.messages)
-            await release_archive.wait()
-            archived.set()
-            return "Summary."
-
-        loop.consolidator.archive_session = _slow_summarize  # type: ignore[method-assign]
-
-        new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
-        await loop._process_message(new_msg, runtime=expected_runtime)
-
-        assert not archived.is_set()
-        release_archive.set()
-        await loop.aclose()
-        assert archived.is_set()
+    assert not observed.is_set()
+    release.set()
+    await loop.aclose()
+    assert observed.is_set()
+    assert "User discussed msg4" in loop.memory.observations()

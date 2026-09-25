@@ -138,7 +138,8 @@
       "fields": {
         "agents_defaults_timezone_mode": {"label": "使用系統時區", "help": "關閉後可手動選擇時區。"},
         "agents_defaults_timezone": {"label": "時區", "help": "選擇時區。UTC 時差依目前日期顯示。"},
-        "agents_defaults_dream_enabled": {"label": "記憶整理", "help": "自動整理對話中的有用資訊。關閉後仍可使用既有記憶。"},
+        "agents_defaults_memory_message_tokens": {"label": "觀察閾值（tokens）", "help": "未觀察的對話達到此 token 數時進行觀察。預設 30,000。"},
+        "agents_defaults_memory_observation_tokens": {"label": "記憶壓縮閾值（tokens）", "help": "觀察日誌超過此大小時進行反思壓縮。預設 40,000。"},
         "gateway_heartbeat_enabled": {"label": "定期檢查", "help": "定期檢查 HEARTBEAT.md 中的任務。"},
         "gateway_heartbeat_interval_s": {"label": "檢查間隔（秒）", "help": "閘道啟動時排定內建定期檢查。"},
         "agents_defaults_max_tool_iterations": {"label": "工具互動輪數上限", "help": "每次回覆中，模型與工具最多可以互動幾輪。"},
@@ -181,7 +182,7 @@
       "groups": {
         "chat": {"title": "WebUI 聊天權限", "help": "本機服務存取與 WebUI 聊天的預設權限。"},
         "identity": {"title": "時區", "help": "選擇排程任務使用的時區。"},
-        "memory": {"title": "記憶", "help": "啟用或停用自動記憶整理。"},
+        "memory": {"title": "記憶", "help": "觀察式記憶會把長對話整理成帶日期的觀察，在所有聊天間共享。"},
         "heartbeat": {"title": "定期檢查排程", "help": "設定內建的定期任務檢查。"},
         "execution": {"title": "智能體執行限制", "help": "調整工具執行與重試行為。"},
         "sessions": {"title": "對話", "help": "跨聊天平台共用對話。"},
@@ -504,7 +505,7 @@
         "user": "對話",
         "api": "API",
         "cron": "自動任務",
-        "dream": "記憶整理",
+        "memory": "記憶整理",
         "system": "輔助呼叫"
       }
     },
@@ -1528,21 +1529,17 @@
             "title": "檢視對話歷史",
             "description": "列印最近 N 則已儲存的對話訊息。"
           },
-          "dream": {
-            "title": "執行 Dream",
-            "description": "手動觸發記憶整理。"
+          "memory": {
+            "title": "記憶",
+            "description": "查看 nanobot 記住的內容；`/memory reflect` 立即壓縮記憶。"
           },
-          "dream_log": {
-            "title": "檢視 Dream 日誌",
-            "description": "檢視上一次 Dream 整理變更了什麼。"
+          "memory_log": {
+            "title": "記憶日誌",
+            "description": "查看最近一次記憶變更。"
           },
-          "dream_restore": {
-            "title": "恢復記憶",
-            "description": "將記憶還原至先前的 Dream 快照。"
-          },
-          "dream_prompt": {
-            "title": "Dream 記憶",
-            "description": "設定 Dream 如何整理目前工作區的記憶。"
+          "memory_restore": {
+            "title": "還原記憶",
+            "description": "將記憶還原到較早的版本。"
           },
           "goal": {
             "title": "長期目標",

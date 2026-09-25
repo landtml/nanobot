@@ -13,7 +13,6 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from typer.testing import CliRunner
 
-from nanobot.agent.memory import MemoryStore
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.turn_delivery import TurnDeliveryFactory
 from nanobot.bus.events import InboundMessage, OutboundMessage
@@ -229,49 +228,6 @@ def test_webui_restores_tty_before_loading_config(monkeypatch, tmp_path: Path) -
     assert calls[:2] == ["tty", "config"]
 
 
-def test_disabled_dream_cursor_only_advances_when_behind(tmp_path) -> None:
-    store = MemoryStore(tmp_path)
-    store.append_history("first")
-    store.append_history("second")
-
-    cli_gateway_runtime._advance_dream_cursor_if_behind(store)
-    assert store.get_last_dream_cursor() == 2
-
-    store.set_last_dream_cursor(10)
-    cli_gateway_runtime._advance_dream_cursor_if_behind(store)
-    assert store.get_last_dream_cursor() == 10
-
-
-def test_commit_dream_changes_skips_noop_run(tmp_path) -> None:
-    store = MemoryStore(tmp_path)
-    store.write_soul("# Soul")
-    store.write_memory("# Memory")
-    store.git.init()
-    store.git.auto_commit("initial")
-    store.git.auto_commit = MagicMock(wraps=store.git.auto_commit)
-
-    assert cli_gateway_runtime._commit_dream_changes(store) is None
-    store.git.auto_commit.assert_not_called()
-
-
-def test_commit_dream_changes_commits_real_edits(tmp_path) -> None:
-    store = MemoryStore(tmp_path)
-    store.write_soul("# Soul")
-    store.write_memory("# Memory")
-    store.git.init()
-    store.git.auto_commit("initial")
-    store.write_memory("# Memory\n- Research notes")
-    store.git.auto_commit = MagicMock(wraps=store.git.auto_commit)
-
-    sha = cli_gateway_runtime._commit_dream_changes(store)
-
-    assert sha is not None
-    store.git.auto_commit.assert_called_once()
-    message = store.git.auto_commit.call_args.args[0]
-    assert message.startswith("dream: periodic memory consolidation\n\n")
-    assert "Research notes" in message
-
-
 @pytest.fixture
 def mock_paths():
     """Mock config/workspace paths for test isolation."""
@@ -316,7 +272,7 @@ def test_onboard_fresh_install(mock_paths):
     assert "nanobot is ready" in result.stdout
     assert config_file.exists()
     assert (workspace_dir / "AGENTS.md").exists()
-    assert (workspace_dir / "memory" / "MEMORY.md").exists()
+    assert not (workspace_dir / "memory" / "MEMORY.md").exists()
     expected_workspace = Config().workspace_path
     assert mock_ws.call_args.args == (expected_workspace,)
 
@@ -2102,7 +2058,6 @@ def test_heartbeat_empty_response_is_not_evaluated(
     config_file = _write_instance_config(tmp_path)
     config = Config()
     config.agents.defaults.workspace = str(tmp_path / "workspace")
-    config.agents.defaults.dream.enabled = True
     config.workspace_path.mkdir(parents=True)
     (config.workspace_path / "HEARTBEAT.md").write_text(
         "## Active Tasks\n\n- Check repository health\n",
@@ -2131,6 +2086,9 @@ def test_heartbeat_empty_response_is_not_evaluated(
 
         def register_system_job(self, _job: CronJob) -> None:
             raise _StopGatewayError("stop")
+
+        def remove_system_job(self, _job_id: str) -> bool:
+            return False
 
     class _FakeAgentLoop(_GatewayAgentContractStub):
         @classmethod
@@ -3391,7 +3349,6 @@ def test_gateway_local_trigger_queue_submits_agent_turns(
 ) -> None:
     config = Config()
     config.agents.defaults.workspace = str(tmp_path / "config-workspace")
-    config.agents.defaults.dream.enabled = False
     config.gateway.heartbeat.enabled = False
     bus = MessageBus()
     seen: dict[str, object] = {}
@@ -3403,19 +3360,6 @@ def test_gateway_local_trigger_queue_submits_agent_turns(
         session_manager=lambda _workspace: _FakeSessionManager(),
         cron_service=lambda _store_path: _FakeCronService(),
     )
-
-    class _FakeMemory:
-        def get_latest_cursor(self) -> int:
-            return 0
-
-        def get_last_dream_cursor(self) -> int:
-            return 0
-
-        def set_last_dream_cursor(self, _cursor: int) -> None:
-            return None
-
-    class _FakeContext:
-        memory = _FakeMemory()
 
     class _FakeSessionManager:
         def flush_all(self) -> int:
@@ -3455,7 +3399,6 @@ def test_gateway_local_trigger_queue_submits_agent_turns(
             self.model = "test-model"
             self.provider = _fake_provider()
             self.tools = {}
-            self.context = _FakeContext()
             self.sessions = kwargs["session_manager"]
             self.submit_local_trigger_turn = AsyncMock()
             self.runtime_resolver = MagicMock()
@@ -3747,6 +3690,9 @@ def test_gateway_health_endpoint_binds_and_serves_expected_responses(
         def register_system_job(self, _job) -> None:
             return None
 
+        def remove_system_job(self, _job_id: str) -> bool:
+            return False
+
     class _FakeServer:
         async def __aenter__(self):
             return self
@@ -3982,6 +3928,9 @@ def test_gateway_agent_task_owns_initial_mcp_provider_close(
         def register_system_job(self, _job) -> None:
             return None
 
+        def remove_system_job(self, _job_id: str) -> bool:
+            return False
+
     class _FakeServer:
         async def __aenter__(self):
             return self
@@ -4098,6 +4047,9 @@ def test_gateway_shutdown_event_exits_forever_runtime_tasks(
 
         def register_system_job(self, _job) -> None:
             return None
+
+        def remove_system_job(self, _job_id: str) -> bool:
+            return False
 
     class _FakeServer:
         async def __aenter__(self):

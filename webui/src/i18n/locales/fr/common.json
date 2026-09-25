@@ -138,7 +138,8 @@
       "fields": {
         "agents_defaults_timezone_mode": {"label": "Utiliser le fuseau horaire du système", "help": "Désactivez pour choisir le fuseau horaire manuellement."},
         "agents_defaults_timezone": {"label": "Fuseau horaire", "help": "Choisissez un fuseau horaire. Le décalage UTC correspond à la date actuelle."},
-        "agents_defaults_dream_enabled": {"label": "Consolidation de la mémoire", "help": "Organise les informations utiles des conversations. La mémoire existante reste disponible après désactivation."},
+        "agents_defaults_memory_message_tokens": {"label": "Observer après (jetons)", "help": "Jetons de conversation non observés qui déclenchent une observation. Par défaut : 30 000."},
+        "agents_defaults_memory_observation_tokens": {"label": "Condenser la mémoire au-delà de (jetons)", "help": "Taille du journal d'observations qui déclenche une réflexion. Par défaut : 40 000."},
         "gateway_heartbeat_enabled": {"label": "Vérification périodique", "help": "Recherche régulièrement des tâches dans HEARTBEAT.md."},
         "gateway_heartbeat_interval_s": {"label": "Intervalle de vérification (secondes)", "help": "La passerelle programme les vérifications à son démarrage."},
         "agents_defaults_max_tool_iterations": {"label": "Itérations des outils par tour", "help": "Nombre maximal d’échanges entre le modèle et les outils par tour."},
@@ -181,7 +182,7 @@
       "groups": {
         "chat": {"title": "Autorisations des conversations WebUI", "help": "Accès aux services locaux et autorisations par défaut des conversations WebUI."},
         "identity": {"title": "Fuseau horaire", "help": "Choisissez le fuseau horaire des tâches planifiées."},
-        "memory": {"title": "Mémoire", "help": "Activez ou désactivez la consolidation automatique de la mémoire."},
+        "memory": {"title": "Mémoire", "help": "La mémoire observationnelle transforme les longues conversations en observations datées partagées entre les discussions."},
         "heartbeat": {"title": "Vérifications périodiques", "help": "Configurez la vérification périodique intégrée des tâches."},
         "execution": {"title": "Limites de l’agent", "help": "Exécution des outils et nouvelles tentatives."},
         "sessions": {"title": "Conversations", "help": "Partagez les conversations entre plateformes."},
@@ -504,7 +505,7 @@
         "user": "Chat",
         "api": "API",
         "cron": "Automatisations",
-        "dream": "Consolidation de la mémoire",
+        "memory": "Consolidation de la mémoire",
         "system": "Appels auxiliaires"
       }
     },
@@ -1528,21 +1529,17 @@
             "title": "Afficher l’historique",
             "description": "Afficher les N derniers messages persistés de la conversation."
           },
-          "dream": {
-            "title": "Lancer Dream",
-            "description": "Déclencher manuellement la consolidation de la mémoire."
+          "memory": {
+            "title": "Mémoire",
+            "description": "Affiche ce dont nanobot se souvient ; `/memory reflect` condense la mémoire maintenant."
           },
-          "dream_log": {
-            "title": "Afficher le journal Dream",
-            "description": "Afficher ce que la dernière consolidation Dream a changé."
+          "memory_log": {
+            "title": "Journal de la mémoire",
+            "description": "Affiche la dernière modification de la mémoire."
           },
-          "dream_restore": {
+          "memory_restore": {
             "title": "Restaurer la mémoire",
-            "description": "Revenir à un instantané Dream précédent."
-          },
-          "dream_prompt": {
-            "title": "Mémoire Dream",
-            "description": "Indiquez à Dream comment organiser la mémoire de cet espace de travail."
+            "description": "Rétablit la mémoire à une version antérieure."
           },
           "goal": {
             "title": "Objectif long terme",

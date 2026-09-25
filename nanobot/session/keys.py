@@ -11,7 +11,7 @@ LAST_CHANNEL_METADATA_KEY = "last_channel"
 
 
 def is_dream_session(key: str) -> bool:
-    """Identify the per-run session namespace owned by Dream."""
+    """Identify sessions left by Dream, the memory system before Observational Memory."""
     return key.startswith("dream:")
 
 

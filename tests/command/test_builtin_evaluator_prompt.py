@@ -16,7 +16,7 @@ from nanobot.utils.evaluator import default_evaluator_prompt
 
 def _make_ctx(tmp_path, raw: str = "/evaluator-prompt", args: str = "") -> CommandContext:
     msg = InboundMessage(channel="cli", sender_id="u1", chat_id="direct", content=raw)
-    loop = SimpleNamespace(context=SimpleNamespace(memory=SimpleNamespace(workspace=tmp_path)))
+    loop = SimpleNamespace(workspace=tmp_path)
     return CommandContext(msg=msg, session=None, key=msg.session_key, raw=raw, args=args, loop=loop)
 
 

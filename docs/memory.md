@@ -1,8 +1,8 @@
 # AI Agent Memory in nanobot
 
-This page explains how nanobot implements long-term AI agent memory: session
-history, compressed archives, durable knowledge files, Dream consolidation, and
-Git-backed memory changes.
+This page explains how nanobot remembers: Observational Memory, the observation
+log it keeps for every conversation in a workspace, how that log is condensed,
+what the agent sees, and how every change is versioned.
 
 nanobot's memory is built on a simple belief: memory should feel alive, but it should not feel chaotic.
 
@@ -12,55 +12,72 @@ That is the shape of memory in nanobot.
 
 ## The Design
 
-nanobot does not treat memory as one giant file.
+nanobot's memory is **Observational Memory**, a faithful port of the system
+[Mastra](https://mastra.ai/research/observational-memory) released as
+`@mastra/memory@1.1.0`. In that configuration it scored 84.23% on
+[LongMemEval](https://github.com/xiaowu0162/LongMemEval) with `gpt-4o` and
+94.87% with `gpt-5-mini`. nanobot does not approximate it: the prompts,
+formatting, parsing, token counting, thresholds and selection rules are held to
+that release byte for byte by tests (see [Faithful to the benchmark](#faithful-to-the-benchmark)).
 
-It separates memory into layers, because different kinds of remembering deserve different tools:
+The idea is the way people remember a working day. Nobody keeps a transcript.
+You keep **observations**: dated, prioritized notes about what happened, what
+was decided, and what matters next.
 
-- `session.messages` holds the living short-term conversation.
-- `memory/history.jsonl` is the running archive of compressed past turns.
-- `SOUL.md`, `USER.md`, and `memory/MEMORY.md` are the durable knowledge files.
-- `GitStore` records how those durable files change over time.
+- An **Observer** reads conversation that has not been observed yet and writes
+  observations about it.
+- A **Reflector** condenses the observation log when it grows large, merging
+  and dropping what no longer needs the spotlight.
+- The agent (the **Actor**) sees the log in its system prompt, with dates
+  annotated relative to today, and continues from it.
 
-This keeps the system light in the moment, but reflective over time.
+One observation log is shared by every conversation in the workspace. What you
+tell nanobot on Telegram is remembered in the WebUI, and the other way round.
 
 ## The Flow
 
-Memory moves through nanobot in two stages.
+### Observe
 
-### Stage 1: Consolidator
+After each reply, nanobot counts the tokens that are not observed yet: the rest
+of the current conversation plus the unobserved part of every other
+conversation in the workspace. Once that backlog reaches **30,000 tokens**, the
+largest conversations are selected, split into batches of about 10,000 tokens,
+and observed in parallel in the background. The reply is never delayed.
 
-When a conversation grows large, nanobot summarizes the conversation covered by compaction and appends the result to `memory/history.jsonl`. The model continues with the summary and any messages after it. The original messages remain in your saved chat history, but messages covered by the summary are no longer sent to the model verbatim. Each summary preserves useful long-term facts and a short handoff for active work.
+Each conversation gets its own section in the log, so observations stay
+attributable. The Observer also records the conversation's **current task** and
+a **suggested response**, which the agent sees the next time that conversation
+continues.
 
-Compaction also runs after a configured period of inactivity, or when you send `/compact`. See [Auto Compact](./configuration.md#auto-compact) for idle timing and how to disable automatic idle compaction.
+Observed messages leave the model's context the next time their conversation
+runs. Your saved chat history is never rewritten: the messages stay in the
+session file and in the WebUI. They are just no longer sent to the model word
+for word, because the observations carry them.
 
-This file is:
+### Observe under pressure
 
-- append-only
-- cursor-based
-- optimized for machine consumption first, human inspection second
+If a single turn fills the context window before the threshold is reached (a
+long tool loop, a huge file), nanobot observes the current conversation on the
+spot, then continues the same turn from its observations. `/compact` does the
+same on demand.
 
-Each line is a JSON object:
+### Reflect
 
-```json
-{"cursor": 42, "timestamp": "2026-04-03 00:02", "content": "- User prefers dark mode\n- Decided to use PostgreSQL"}
-```
+When the observation log grows past **40,000 tokens**, the Reflector rewrites
+it into a denser log. If the first rewrite is not smaller than the threshold,
+it tries once more with a stronger compression instruction. `/memory reflect`
+runs a reflection immediately.
 
-It is not the final memory. It is the material from which final memory is shaped.
+### Recall
 
-### Stage 2: Dream
+Every request carries the log as the last section of the system prompt, so the
+stable part of the prompt before it stays cacheable. The agent sees:
 
-`Dream` is the slower, more thoughtful layer. It runs on a cron schedule by default and can also be triggered manually.
-
-Dream reads:
-
-- new entries from `memory/history.jsonl`
-- the current `SOUL.md`
-- the current `USER.md`
-- the current `memory/MEMORY.md`
-
-Then it edits the long-term files surgically in a single pass — not by rewriting everything, but by making the smallest honest change that keeps memory coherent.
-
-This is why nanobot's memory is not just archival. It is interpretive.
+- the observation log, with relative dates such as "(yesterday)" or
+  "(2 weeks ago)" added for the current day;
+- the current conversation's task and suggested response;
+- the recent, not-yet-observed messages of *other* conversations, so a thread
+  started elsewhere is not lost while it waits to be observed.
 
 ## The Files
 
@@ -71,17 +88,12 @@ working directory; it does not relocate the files below.
 
 ```text
 workspace/
-├── SOUL.md              # The bot's long-term voice and communication style
-├── USER.md              # Stable knowledge about the user
-├── prompts/
-│   ├── README.md        # Notes for memory guidance files
-│   └── dream.md         # Optional instructions for how Dream organizes memory
+├── SOUL.md                          # The bot's long-term voice and communication style
+├── USER.md                          # Stable knowledge about the user
 └── memory/
-    ├── MEMORY.md        # Project facts, decisions, and durable context
-    ├── history.jsonl    # Append-only history summaries
-    ├── .cursor          # Consolidator write cursor
-    ├── .dream_cursor    # Dream consumption cursor
-    └── .git/            # Version history for long-term memory files
+    ├── observations.md              # The observation log (plain text)
+    ├── observational_memory.json    # Per-conversation cursors, tasks, reflection count
+    └── .git/                        # Version history for SOUL.md, USER.md, observations.md
 ```
 
 A selected project may provide its own `AGENTS.md`, but project-local `SOUL.md`,
@@ -93,38 +105,24 @@ These files play different roles:
 
 - `SOUL.md` remembers how nanobot should sound.
 - `USER.md` remembers who the user is and what they prefer.
-- `MEMORY.md` remembers what remains true about the work itself.
-- `history.jsonl` remembers what happened on the way there.
+- `observations.md` remembers what happened and what remains true.
 
-## Why `history.jsonl`
+`observations.md` is ordinary text, grouped by conversation and date:
 
-The old `HISTORY.md` format was pleasant for casual reading, but it was too fragile as an operational substrate.
-
-`history.jsonl` gives nanobot:
-
-- stable incremental cursors
-- safer machine parsing
-- easier batching
-- cleaner migration and compaction
-- a better boundary between raw history and curated knowledge
-
-You can still search it with familiar tools:
-
-```bash
-# grep
-grep -i "keyword" memory/history.jsonl
-
-# jq
-cat memory/history.jsonl | jq -r 'select(.content | test("keyword"; "i")) | .content' | tail -20
-
-# Python
-python -c "import json; [print(json.loads(l).get('content','')) for l in open('memory/history.jsonl','r',encoding='utf-8') if l.strip() and 'keyword' in l.lower()][-20:]"
+```text
+<thread id="6f3a9c1e">
+Date: Sep 24, 2026
+* 🔴 (09:14) User is migrating the billing service to PostgreSQL 16
+* 🟡 (09:20) Agent proposed a two-phase cutover; user approved phase one
+</thread>
 ```
 
-The difference is philosophical as much as technical:
-
-- `history.jsonl` is for structure
-- `SOUL.md`, `USER.md`, and `MEMORY.md` are for meaning
+Read it, grep it, or show it with `/memory`. Do not edit it by hand while
+nanobot runs: every write goes through a file lock and a revision check so a
+CLI and a gateway sharing one workspace never overwrite each other, and the
+agent's shell tool refuses direct writes to the memory files. To change
+memory, use `/memory-restore`, or `bot.memory.write(...)` from the
+[Python SDK](./python-sdk.md).
 
 ## Commands
 
@@ -132,20 +130,23 @@ Memory is not hidden behind the curtain. Users can inspect and guide it.
 
 | Command | What it does |
 |---------|--------------|
-| `/compact` | Summarize the current conversation context while keeping saved chat history |
-| `/dream` | Run Dream immediately |
-| `/dream-log` | Show the latest Dream memory change |
-| `/dream-log <sha>` | Show a specific Dream change |
-| `/dream-restore` | List recent Dream memory versions |
-| `/dream-restore <sha>` | Restore memory to the state before a specific change |
-| `/dream-prompt` | Show how Dream is being guided for memory |
-| `/dream-prompt init` | Create an editable Dream memory guide at `prompts/dream.md` |
+| `/memory` | Show memory status and the most recent observations |
+| `/memory reflect` | Condense the observation log now |
+| `/compact` | Observe this conversation now and continue from memory |
+| `/memory-log` | Show the latest memory change |
+| `/memory-log <sha>` | Show a specific memory change |
+| `/memory-restore` | List recent memory versions |
+| `/memory-restore <sha>` | Restore memory to the state before a specific change |
+
+On Telegram, use `/memory_log` and `/memory_restore`.
 
 These commands exist for a reason: automatic memory is powerful, but users should always retain the right to inspect, understand, and restore it.
 
 ## Versioned Memory
 
-After Dream changes long-term memory files, nanobot can record that change with `GitStore`.
+Every change to the observation log is a commit in the workspace's memory
+repository, with a `memory:` message that says what happened (`memory: observe 2
+session(s)`, `memory: reflect`, `memory: compact one session`).
 
 This gives memory a history of its own:
 
@@ -155,39 +156,30 @@ This gives memory a history of its own:
 
 That turns memory from a silent mutation into an auditable process.
 
-## Guiding Dream
+## Private Conversations
 
-Dream decides what to keep, update, or forget using nanobot's built-in memory instructions. Most users can leave this alone.
+Temporary chats and other sessions that are not saved never write memory.
+They do not see the workspace's observations either, and when such a
+conversation is condensed under pressure the Observer is not shown them. What a
+private conversation observes about itself stays with that conversation and
+disappears with it.
 
-If one workspace needs a different memory style, create an editable guide:
-
-```text
-/dream-prompt init
-```
-
-This creates:
-
-```text
-workspace/prompts/dream.md
-```
-
-Edit that file in plain Markdown. When it has content, Dream follows it for this workspace before reading the latest conversation history. You do not need to paste history into the file; Dream adds the current `## Conversation History` block automatically.
-
-To return to nanobot's default behavior, delete `prompts/dream.md` or leave it empty.
-
-Each workspace has its own guide. Changing this file does not affect other nanobot workspaces.
+Subagents and one-off runs (for example SDK calls with `ephemeral=True`) never
+change memory.
 
 ## Configuration
 
-Dream is configured under `agents.defaults.dream`:
+Memory is configured under `agents.defaults.memory`:
 
 ```json
 {
   "agents": {
     "defaults": {
-      "dream": {
-        "intervalH": 2,
-        "modelOverride": null
+      "memory": {
+        "modelOverride": null,
+        "messageTokens": 30000,
+        "observationTokens": 40000,
+        "maxTokensPerBatch": 10000
       }
     }
   }
@@ -196,22 +188,71 @@ Dream is configured under `agents.defaults.dream`:
 
 | Field | Meaning |
 |-------|---------|
-| `intervalH` | How often Dream runs, in hours |
-| `cron` | Cron expression override (takes precedence over `intervalH`) |
-| `modelOverride` | Optional model preset name used for Dream |
+| `modelOverride` | Optional model preset for the Observer and Reflector |
+| `messageTokens` | Unobserved tokens that trigger an observation |
+| `observationTokens` | Observation log size that triggers a reflection |
+| `maxTokensPerBatch` | Size of each parallel Observer call |
 
-In practical terms:
+`modelOverride` selects a named entry from `modelPresets`; raw model
+identifiers are not supported. If omitted, memory uses the agent's default
+model. Observation and reflection run often and in the background, so a fast,
+inexpensive model works well; Mastra's default for both is `gemini-2.5-flash`.
 
-- `intervalH` is the normal way to configure Dream frequency. Internally it runs as an `every` schedule.
-- `cron` overrides `intervalH` when set, allowing precise cron expressions (e.g. `0 */4 * * *`).
-- `modelOverride` selects a named entry from `model_presets` for Dream. It accepts preset names only; raw model identifiers are not supported. If omitted, Dream uses the main agent's selected runtime.
+The defaults are the values behind the LongMemEval result. Change them only
+with a reason: lower thresholds observe and reflect more often (more model
+calls, a smaller context), higher ones do the opposite. The WebUI offers both
+thresholds under **Settings → Capabilities → Memory**; changes apply after a
+restart.
+
+Memory calls are counted under **Memory** in token usage.
+
+## Faithful to the Benchmark
+
+`nanobot/agent/observational_memory/` is a Python port of the 1.1.0 processor.
+`tests/agent/observational_memory/test_golden.py` compares it with the
+TypeScript original on shared fixtures, in three time zones: every prompt, the
+message formatting, the output parsers, the rendered context block, token
+counts (`o200k_base`), and which conversations are selected and batched. How
+to regenerate those fixtures is described in `scripts/om_golden/README.md`.
+
+A few differences are deliberate, and none of them touch what LongMemEval
+measures:
+
+- Tool calls and their results are shown to the Observer together, and very
+  large tool payloads are truncated.
+- Conversation ids are obscured in the Observer prompt as well as in the
+  Actor's context.
+- Observation runs after a reply rather than between tool calls; context
+  pressure inside a turn is handled by observing on the spot.
+
+## Upgrading from Dream
+
+Earlier versions of nanobot remembered with **Dream**, a scheduled job that
+edited `memory/MEMORY.md` from summaries in `memory/history.jsonl`. On the
+first start after upgrading:
+
+- a customized `memory/MEMORY.md` is carried into the observation log once, as
+  one dated entry, so nothing Dream learned is lost; the file itself is left
+  in place;
+- the Dream cron job is removed, and the `/dream*` commands no longer exist;
+- `agents.defaults.dream.modelOverride` is used as the memory model preset
+  unless `agents.defaults.memory` sets one; the other Dream and idle
+  auto-compaction settings are ignored and dropped the next time the
+  configuration is saved;
+- conversations that have not changed since the upgrade are not observed
+  retroactively, so an upgrade does not bill a model for old history. They
+  join memory as soon as they continue.
+
+`memory/history.jsonl` and `prompts/dream.md` are no longer read. You can
+keep them for reference or delete them.
 
 ## In Practice
 
 What this means in daily use is simple:
 
 - conversations can stay fast without carrying infinite context
-- durable facts can become clearer over time instead of noisier
+- what happened becomes dated, prioritized observations instead of a growing transcript
+- every conversation benefits from what the others learned
 - the user can inspect and restore memory when needed
 
 Memory should not feel like a dump. It should feel like continuity.

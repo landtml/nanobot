@@ -47,7 +47,7 @@ the focused guides first and come back here for exact fields and defaults.
 | Add MCP servers | [MCP](#mcp-model-context-protocol) |
 | Review shell, workspace, and SSRF controls | [Security](#security) |
 | Control access and pairing | [Pairing](#pairing) |
-| Tune gateway jobs, sessions, and tools | [Gateway Heartbeat](#gateway-heartbeat), [Auto Compact](#auto-compact), [Unified Session](#unified-session), [Tool Hint Max Length](#tool-hint-max-length) |
+| Tune gateway jobs, sessions, and tools | [Gateway Heartbeat](#gateway-heartbeat), [Memory](#memory), [Unified Session](#unified-session), [Tool Hint Max Length](#tool-hint-max-length) |
 
 ## Where a Setting Lives
 
@@ -190,7 +190,7 @@ These variables are process-level switches. Set them in the same terminal, servi
 |----------|---------|-------------|
 | `NANOBOT_MAX_CONCURRENT_REQUESTS` | Unlimited | Maximum concurrently running inbound agent requests. Set a positive integer to apply a cap; unset, `0`, or a negative value means unlimited. |
 | `NANOBOT_LLM_TIMEOUT_S` | Unused | Model calls use streaming idle timeouts instead of a fixed total duration. Use `NANOBOT_STREAM_IDLE_TIMEOUT_S` to control stalled requests. |
-| `NANOBOT_STREAM_IDLE_TIMEOUT_S` | `90` | Maximum idle wait, in seconds, for model streams, including internal tasks such as Dream, memory archiving, title generation, and Heartbeat evaluation. Each stream event renews the wait, including reasoning and tool-call deltas. Invalid or non-positive values are ignored; values above `3600` are clamped. |
+| `NANOBOT_STREAM_IDLE_TIMEOUT_S` | `90` | Maximum idle wait, in seconds, for model streams, including internal tasks such as memory observation and reflection, title generation, and Heartbeat evaluation. Each stream event renews the wait, including reasoning and tool-call deltas. Invalid or non-positive values are ignored; values above `3600` are clamped. |
 | `NANOBOT_OPENAI_COMPAT_TIMEOUT_S` | `120` | HTTP request timeout, in seconds, for direct non-streaming OpenAI-compatible provider calls. Streaming calls use `NANOBOT_STREAM_IDLE_TIMEOUT_S`. Invalid or non-positive values are ignored. |
 | `NANOBOT_WORKSPACE_SANDBOX_ENFORCED` | unset | Marks that an external workspace sandbox is already enforced. Truthy values (`1`, `true`, `yes`, `on`, `enabled`) use `NANOBOT_WORKSPACE_SANDBOX_PROVIDER` as the label; any other non-false value is treated as the provider name. |
 | `NANOBOT_WORKSPACE_SANDBOX_PROVIDER` | `unknown` | Display label for the external workspace sandbox when `NANOBOT_WORKSPACE_SANDBOX_ENFORCED` is truthy, for example `macos_app_sandbox` or `bwrap`. |
@@ -1447,7 +1447,7 @@ Existing configs do not need to change. Direct `agents.defaults.model`, `provide
 }
 ```
 
-`modelPresets` is a top-level object. Each key (`fast`, `deep`, `coding`, etc.) is the preset's one canonical name: it is shown in the interface, passed to `/model <name>`, and referenced by defaults, fallbacks, sessions, and Dream. New and renamed presets must be unique ignoring case. Existing keys accepted by earlier releases remain loadable so upgrades do not break startup. Each preset supports:
+`modelPresets` is a top-level object. Each key (`fast`, `deep`, `coding`, etc.) is the preset's one canonical name: it is shown in the interface, passed to `/model <name>`, and referenced by defaults, fallbacks, sessions, and memory. New and renamed presets must be unique ignoring case. Existing keys accepted by earlier releases remain loadable so upgrades do not break startup. Each preset supports:
 
 Older configs may still contain a `label` inside a preset. It is accepted when loading for compatibility but ignored; the object key remains the canonical name.
 
@@ -1456,7 +1456,7 @@ Older configs may still contain a `label` inside a preset. It is accepted when l
 | `model` | Model name to use for this preset. |
 | `provider` | Provider name, or `"auto"` to use provider auto-detection. |
 | `maxTokens` | Maximum completion/output tokens. |
-| `contextWindowTokens` | Context window size used by prompt building and consolidation decisions. |
+| `contextWindowTokens` | Context window size used by prompt building and context-pressure decisions. |
 | `temperature` | Sampling temperature. |
 | `reasoningEffort` | Optional reasoning/thinking setting. Provider support varies. |
 
@@ -2113,7 +2113,7 @@ For API keys, tokens, and other secrets, see [Environment Variables for Secrets]
 > workspace, that project becomes the normal file and shell boundary. Nanobot
 > adds capability-specific, read-only access for built-in skills, the agent
 > workspace's `skills/` directory, and the exact agent
-> `memory/history.jsonl` file. Neighboring memory/profile files and all
+> `memory/observations.md` file. Neighboring memory/profile files and all
 > cross-workspace writes remain denied. Agent-owned `SOUL.md` and `USER.md` are
 > assembled into model context directly; this does not grant file tools broader
 > access to the agent workspace.
@@ -2271,16 +2271,23 @@ The deprecated `agents.defaults.failOnToolError` field is silently ignored when 
 | `agents.defaults.maxConcurrentSubagents` | `4` | Maximum number of subagents that may run at the same time. Additional tasks wait for capacity. |
 
 
-## Auto Compact
+## Memory
 
-When a session is idle for longer than a configured threshold, nanobot summarizes its conversation context. When you return, the model receives that summary and new messages instead of replaying the messages covered by the summary. The original conversation remains in your saved chat history, but even its most recent messages are no longer included verbatim in the model's context after idle compaction.
+nanobot remembers with Observational Memory: once a workspace's conversations
+hold about 30,000 tokens that have not been observed yet, an Observer turns
+them into dated observations that every conversation sees, and the observed
+messages leave the model's context. The observation log is condensed when it
+passes about 40,000 tokens.
 
 ```json
 {
   "agents": {
     "defaults": {
-      "idleCompactAfterMinutes": 15,
-      "idleCompactCheckIntervalSeconds": 60
+      "memory": {
+        "modelOverride": "fast",
+        "messageTokens": 30000,
+        "observationTokens": 40000
+      }
     }
   }
 }
@@ -2288,21 +2295,21 @@ When a session is idle for longer than a configured threshold, nanobot summarize
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `agents.defaults.idleCompactAfterMinutes` | `15` | Minutes of idle time before auto-compaction starts. Set to `0` to disable. The default is close to a typical LLM KV cache expiry window, so stale sessions get compacted before the user returns. |
-| `agents.defaults.idleCompactCheckIntervalSeconds` | `60` | Minimum number of seconds between scans for idle sessions. Set to `0` to scan on every idle tick (~1 s). |
+| `agents.defaults.memory.modelOverride` | `null` | Model preset for the Observer and Reflector. `null` uses the agent's default model. |
+| `agents.defaults.memory.messageTokens` | `30000` | Unobserved tokens that trigger an observation (minimum `1000`). |
+| `agents.defaults.memory.observationTokens` | `40000` | Observation log size that triggers a reflection (minimum `1000`). |
+| `agents.defaults.memory.maxTokensPerBatch` | `10000` | Size of each parallel Observer call (minimum `1000`). |
 
-`sessionTtlMinutes` remains accepted as a legacy alias for backward compatibility, but `idleCompactAfterMinutes` is the preferred config key going forward.
+The defaults are the configuration behind Observational Memory's LongMemEval
+result. Observation runs in the background after a reply; if a single turn
+fills the context window first, the current conversation is observed on the
+spot. The saved chat history is never rewritten. Use `/compact` to observe the
+current conversation now.
 
-How it works:
-1. **Idle detection**: On each idle tick (~1 s), checks whether an idle-session scan is due. By default, the full scan runs at most once per minute.
-2. **Background compaction**: The conversation so far is summarized for the next turn.
-3. **Session preservation**: The complete session history remains stored for later inspection and reuse.
-4. **Restart-safe resume**: The compacted context remains available after a process restart.
-
-> [!NOTE]
-> Auto compact shortens the context sent to the model without deleting the session's structured message history.
-
-Use `/compact` in chat to compact the current session without waiting for the idle threshold.
+`dream`, `idleCompactAfterMinutes`, `idleCompactCheckIntervalSeconds` and
+`sessionTtlMinutes` from earlier releases are ignored; a Dream `modelOverride`
+carries over to `memory.modelOverride`. See [`memory.md`](./memory.md) for the
+design and the upgrade path.
 
 ## Timezone
 

@@ -5,9 +5,8 @@ import mimetypes
 import platform
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence, cast
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 
-from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.agent.tools import image_generation as image_generation_tools
 from nanobot.agent.tools import mcp as mcp_tools
@@ -27,9 +26,11 @@ from nanobot.runtime_context import (
 from nanobot.security.workspace_access import WorkspaceScopeResolver
 from nanobot.session.keys import last_channel_from_metadata
 from nanobot.session.manager import Session
-from nanobot.session.summary import SessionSummary
 from nanobot.utils.helpers import detect_image_mime, load_bundled_template
 from nanobot.utils.prompt_templates import render_template
+
+if TYPE_CHECKING:
+    from nanobot.agent.memory import Memory
 
 
 def session_extra(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -69,6 +70,15 @@ class PersistedPromptContextResolver:
         return channel, scope.project_path
 
 
+MEMORY_PREFIX_META = "memory_prefix"
+
+
+def is_memory_prefix(message: Mapping[str, Any]) -> bool:
+    """True for history messages that memory adds and the session never stores."""
+    meta = message.get("_meta")
+    return isinstance(meta, Mapping) and cast(Mapping[str, Any], meta).get(MEMORY_PREFIX_META) is True
+
+
 @dataclass(frozen=True, slots=True)
 class TranscriptInput:
     """Raw turn inputs from which ``ContextBuilder`` assembles a transcript."""
@@ -77,7 +87,8 @@ class TranscriptInput:
     current_message: str | None
     media: Sequence[str] | None = None
     current_role: str = "user"
-    session_summary: SessionSummary | None = None
+    memory_key: str | None = None
+    """Session whose view of memory the system prompt shows."""
     runtime_context_blocks: Sequence[RuntimeContextBlock] | None = None
 
     @property
@@ -92,19 +103,25 @@ class ContextBuilder:
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md"]
     _SKIPPABLE_DEFAULTS = {"AGENTS.md", "USER.md"}
 
-    def __init__(self, workspace: Path, timezone: str | None = None, disabled_skills: list[str] | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        timezone: str | None = None,
+        disabled_skills: list[str] | None = None,
+        memory: "Memory | None" = None,
+    ):
         self.workspace = workspace
         self.timezone = timezone
-        self.memory = MemoryStore(workspace)
+        self.memory = memory
         self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
 
     def build_system_prompt(
         self,
         *,
         channel: str | None = None,
-        session_summary: SessionSummary | None = None,
+        memory_key: str | None = None,
         workspace: Path | None = None,
-        include_memory: bool = True,
+        durable_memory: bool = True,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         root = workspace or self.workspace
@@ -124,11 +141,6 @@ class ContextBuilder:
                 "Use it as the default root for project files and relative tool paths."
             )
 
-        if include_memory:
-            memory = self.memory.read_memory()
-            if memory and not self._is_template_content(memory, "memory/MEMORY.md"):
-                parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
-
         active_skills = self.skills.get_always_skills()
         if active_skills:
             active_content = self.skills.load_skills_for_context(active_skills)
@@ -142,12 +154,11 @@ class ContextBuilder:
         if skills_summary:
             parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
 
-        if session_summary and session_summary["text"] != "(nothing)":
-            parts.append(
-                "[Archived Context Summary]\n\n"
-                f"Previous conversation summary (last active {session_summary['last_active']}):\n"
-                f"{session_summary['text']}"
-            )
+        # Last, so the stable prefix above stays cacheable as memory evolves.
+        if self.memory is not None:
+            block = self.memory.system_prompt_block(memory_key, durable=durable_memory)
+            if block:
+                parts.append(f"# Memory\n{block}")
 
         return "\n\n---\n\n".join(parts)
 
@@ -212,8 +223,9 @@ class ContextBuilder:
                     content = load_bundled_template("SOUL.md") or content
                 if not content.strip():
                     continue
-                if filename in self._SKIPPABLE_DEFAULTS and self._is_template_content(
-                    content, filename
+                if filename in self._SKIPPABLE_DEFAULTS and (
+                    self._is_template_content(content, filename)
+                    or self._is_template_content(content, f"legacy/{filename}")
                 ):
                     continue
                 parts.append(f"## {filename}\n\n{content}")
@@ -236,10 +248,10 @@ class ContextBuilder:
         media: list[str] | None = None,
         channel: str | None = None,
         current_role: str = "user",
-        session_summary: SessionSummary | None = None,
+        memory_key: str | None = None,
         runtime_context_blocks: Sequence[RuntimeContextBlock] | None = None,
         workspace: Path | None = None,
-        include_memory: bool = True,
+        durable_memory: bool = True,
     ) -> list[dict[str, Any]]:
         """Compatibility wrapper for callers that need merged adjacent roles."""
         messages = self.build_transcript(
@@ -248,12 +260,12 @@ class ContextBuilder:
                 current_message=current_message,
                 media=media,
                 current_role=current_role,
-                session_summary=session_summary,
+                memory_key=memory_key,
                 runtime_context_blocks=runtime_context_blocks,
             ),
             channel=channel,
             workspace=workspace,
-            include_memory=include_memory,
+            durable_memory=durable_memory,
         )
         if current_message is None:
             return messages
@@ -279,7 +291,7 @@ class ContextBuilder:
         *,
         channel: str | None = None,
         workspace: Path | None = None,
-        include_memory: bool = True,
+        durable_memory: bool = True,
     ) -> list[dict[str, Any]]:
         """Build a model transcript while preserving the fresh-turn boundary."""
         root = workspace or self.workspace
@@ -288,9 +300,9 @@ class ContextBuilder:
                 "role": "system",
                 "content": self.build_system_prompt(
                     channel=channel,
-                    session_summary=transcript.session_summary,
+                    memory_key=transcript.memory_key,
                     workspace=root,
-                    include_memory=include_memory,
+                    durable_memory=durable_memory,
                 ),
             },
             *transcript.history,

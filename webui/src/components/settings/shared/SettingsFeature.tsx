@@ -25,22 +25,24 @@ export function SettingsFeature({
   title, enabled, onChange, disabled, initialOpen = false, error, children,
 }: {
   title: string;
-  enabled: boolean;
-  onChange: (enabled: boolean) => void;
+  /** Omit for an always-on feature: the row then only opens its settings. */
+  enabled?: boolean;
+  onChange?: (enabled: boolean) => void;
   disabled?: boolean;
   initialOpen?: boolean;
   error?: string;
   children?: ReactNode;
 }) {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(initialOpen && enabled);
+  const active = enabled ?? true;
+  const [open, setOpen] = useState(initialOpen && active);
   const section = useRef<HTMLElement>(null);
   useEffect(() => {
-    if (initialOpen && enabled) {
+    if (initialOpen && active) {
       setOpen(true);
       section.current?.scrollIntoView?.({ block: "nearest" });
     }
-  }, [initialOpen, enabled]);
+  }, [initialOpen, active]);
   return (
     <section ref={section} aria-label={title}>
       <Dialog open={Boolean(children) && open} onOpenChange={setOpen}>
@@ -59,8 +61,8 @@ export function SettingsFeature({
               {t("settings.configure")}
             </button>
           </DialogTrigger> : null}
-          <ToggleButton checked={enabled} disabled={disabled} ariaLabel={title} label={title}
-            onChange={(next) => { setOpen(next); onChange(next); }} />
+          {onChange ? <ToggleButton checked={active} disabled={disabled} ariaLabel={title} label={title}
+            onChange={(next) => { setOpen(next); onChange(next); }} /> : null}
         </SettingsRow>
       </SettingsGroup>
       {children ? <DialogContent aria-describedby={undefined} className="settings-grid max-h-[85dvh] w-[min(calc(100vw-2rem),40rem)] max-w-none overflow-y-auto p-0 [--settings-surface:var(--background)]">

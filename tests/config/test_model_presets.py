@@ -337,22 +337,46 @@ def test_validator_rejects_unknown_preset() -> None:
         })
 
 
-def test_validator_accepts_dream_model_preset() -> None:
+def test_validator_accepts_memory_model_preset() -> None:
     config = Config.model_validate({
         "modelPresets": {
-            "dream": {"model": "anthropic/claude-haiku-4-5", "provider": "anthropic"},
+            "cheap": {"model": "anthropic/claude-haiku-4-5", "provider": "anthropic"},
         },
-        "agents": {"defaults": {"dream": {"modelOverride": "dream"}}},
+        "agents": {"defaults": {"memory": {"modelOverride": "cheap"}}},
     })
 
-    assert config.agents.defaults.dream.model_override == "dream"
+    assert config.agents.defaults.memory.model_override == "cheap"
 
 
-def test_validator_rejects_unknown_dream_model_preset() -> None:
-    with pytest.raises(ValueError, match="Dream model preset 'unknown' not found"):
+def test_validator_rejects_unknown_memory_model_preset() -> None:
+    with pytest.raises(ValueError, match="Memory model preset 'unknown' not found"):
         Config.model_validate({
-            "agents": {"defaults": {"dream": {"modelOverride": "unknown"}}},
+            "agents": {"defaults": {"memory": {"modelOverride": "unknown"}}},
         })
+
+
+def test_dream_model_preset_carries_over_to_memory() -> None:
+    config = Config.model_validate({
+        "modelPresets": {"cheap": {"model": "anthropic/claude-haiku-4-5"}},
+        "agents": {"defaults": {"dream": {"modelOverride": "cheap", "intervalH": 2}}},
+    })
+
+    assert config.agents.defaults.memory.model_override == "cheap"
+
+
+def test_memory_section_wins_over_legacy_dream_preset() -> None:
+    config = Config.model_validate({
+        "modelPresets": {
+            "cheap": {"model": "anthropic/claude-haiku-4-5"},
+            "fast": {"model": "openai/gpt-4.1-mini"},
+        },
+        "agents": {"defaults": {
+            "dream": {"modelOverride": "cheap"},
+            "memory": {"modelOverride": "fast"},
+        }},
+    })
+
+    assert config.agents.defaults.memory.model_override == "fast"
 
 
 def test_model_preset_accepts_explicit_default_name() -> None:

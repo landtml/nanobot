@@ -469,7 +469,7 @@ def test_update_model_configuration_renames_preset_and_config_references(
     defaults = config.agents.defaults
     defaults.model_preset = "openai"
     defaults.fallback_models = ["backup", "openai"]
-    defaults.dream.model_override = "openai"
+    defaults.memory.model_override = "openai"
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
     session_manager = SessionManager(
@@ -496,7 +496,7 @@ def test_update_model_configuration_renames_preset_and_config_references(
     assert list(saved.model_presets) == ["Codex", "backup"]
     assert saved.agents.defaults.model_preset == "Codex"
     assert saved.agents.defaults.fallback_models == ["backup", "Codex"]
-    assert saved.agents.defaults.dream.model_override == "Codex"
+    assert saved.agents.defaults.memory.model_override == "Codex"
     persisted = SessionManager(
         tmp_path / "workspace",
         sessions_root=tmp_path / "sessions",

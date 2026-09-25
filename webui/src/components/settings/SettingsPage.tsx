@@ -309,10 +309,10 @@ export function SettingsPage({
               onChange={(enabled) => toggleRuntime("tools.web.enable", enabled)}>
               {renderSection("browser", true)}
             </SettingsFeature>
-            <SettingsFeature title={t("settings.runtimeConfig.fields.agents_defaults_dream_enabled.label")}
-              enabled={state.value("agents.defaults.dream.enabled") === true}
-              disabled={restartInProgress || state.saving === "memory" || !settings.runtime_config} error={state.errors.memory}
-              onChange={(enabled) => toggleRuntime("agents.defaults.dream.enabled", enabled)} />
+            <SettingsFeature title={t("settings.nav.memory")} initialOpen={activeSection === "memory"}
+              error={state.errors.memory}>
+              {settings.runtime_config ? renderSection("memory", true) : null}
+            </SettingsFeature>
             {!settings.runtime_config ? <p className="settings-list-inset text-[13px] text-muted-foreground">{t("settings.runtimeConfig.unavailable")}</p> : null}
           </section>
         );

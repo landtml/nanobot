@@ -106,7 +106,7 @@ def test_subagent_prompt_keeps_agent_paths_for_selected_project(tmp_path):
     assert "Join them when using `read_file`" in prompt
     assert str(project.resolve()) not in prompt
     assert f"Nanobot's agent workspace: {agent_workspace.resolve()}" in prompt
-    assert f"History log: {agent_workspace.resolve() / 'memory' / 'history.jsonl'}" in prompt
+    assert f"Memory (read-only): {agent_workspace.resolve() / 'memory' / 'observations.md'}" in prompt
     assert "global-custom" in prompt
     assert "project-custom" not in prompt
 
@@ -124,7 +124,7 @@ def test_subagent_prompt_uses_relative_paths_in_agent_workspace(tmp_path):
     prompt = manager._build_subagent_prompt()
 
     assert str(tmp_path.resolve()) not in prompt
-    assert "History log: memory/history.jsonl" in prompt
+    assert "Memory (read-only): memory/observations.md" in prompt
     assert "### Workspace skills (`skills`)" in prompt
 
 
@@ -188,7 +188,7 @@ async def test_subagent_recovers_from_tool_error_in_same_run(tmp_path):
         workspace=tmp_path,
         bus=MessageBus(),
         max_tool_result_chars=16_000,
-        consolidator=MagicMock(),
+        memory=MagicMock(),
     )
 
     result = await sm.run_inline(
@@ -202,50 +202,50 @@ async def test_subagent_recovers_from_tool_error_in_same_run(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_subagent_pressure_uses_transient_summary(tmp_path):
+async def test_subagent_pressure_observes_into_a_transient_overlay(tmp_path):
+    from nanobot.agent.memory import Memory
+    from nanobot.session.manager import SessionManager
+
     provider = MagicMock(spec=LLMProvider)
     provider.get_default_model.return_value = "test"
     provider.can_resume_conversation_state.return_value = False
     provider.generation = GenerationSettings(max_tokens=100)
 
+    def is_observer(messages):
+        return str(messages[0].get("content")).startswith("You are the memory consciousness")
+
     def estimate(messages, _tools, _model):
-        if sum(message.get("role") == "tool" for message in messages) >= 2:
+        if not is_observer(messages) and sum(m.get("role") == "tool" for m in messages) >= 2:
             return 600, "test-counter"
         return 100, "test-counter"
 
+    turns = 0
+
+    async def respond(*, messages, **_kwargs):
+        nonlocal turns
+        if is_observer(messages):
+            return LLMResponse(content=(
+                "<observations>\nDate: Sep 25, 2026\n"
+                "* 🔴 (10:00) Subagent listed the workspace twice\n</observations>"
+            ))
+        turns += 1
+        if turns <= 2:
+            return LLMResponse(
+                content="checking",
+                tool_calls=[ToolCallRequest(id=f"call-{turns}", name="list_dir",
+                                            arguments={"path": "."})],
+            )
+        return LLMResponse(content="done", tool_calls=[])
+
     provider.estimate_prompt_tokens = MagicMock(side_effect=estimate)
-    provider.chat_stream_with_retry = AsyncMock(side_effect=[
-        LLMResponse(
-            content="checking",
-            tool_calls=[ToolCallRequest(
-                id="call-1",
-                name="list_dir",
-                arguments={"path": "."},
-            )],
-        ),
-        LLMResponse(
-            content="checking again",
-            tool_calls=[ToolCallRequest(
-                id="call-2",
-                name="list_dir",
-                arguments={"path": "."},
-            )],
-        ),
-        LLMResponse(content="done", tool_calls=[]),
-    ])
-    consolidator = MagicMock()
-    consolidator.summarize_transcript = AsyncMock(return_value="Subagent checkpoint.")
-    consolidator.summarize_provider_compaction = AsyncMock(return_value=None)
+    provider.chat_stream_with_retry = AsyncMock(side_effect=respond)
+    runtime = LLMRuntime.capture(provider, "test", context_window_tokens=1_624)
+    memory = Memory(tmp_path, SessionManager(tmp_path), runtime=lambda: runtime, timezone="UTC")
     manager = SubagentManager(
         workspace=tmp_path,
         bus=MessageBus(),
         max_tool_result_chars=16_000,
-        consolidator=consolidator,
-    )
-    runtime = LLMRuntime.capture(
-        provider,
-        "test",
-        context_window_tokens=1_624,
+        memory=memory,
     )
 
     result = await manager.run_inline(
@@ -255,11 +255,14 @@ async def test_subagent_pressure_uses_transient_summary(tmp_path):
     )
 
     assert result == "done"
-    consolidator.summarize_transcript.assert_awaited_once()
-    assert consolidator.summarize_transcript.await_args.kwargs["persist"] is False
-    model_request = provider.chat_stream_with_retry.await_args_list[2].kwargs["messages"]
-    assert "Subagent checkpoint." in model_request[0]["content"]
-    assert sum(message.get("role") == "tool" for message in model_request) == 1
+    requests = [call.kwargs["messages"] for call in provider.chat_stream_with_retry.await_args_list]
+    assert [is_observer(r) for r in requests] == [False, False, True, False]
+    assert "inspect the workspace" in requests[2][1]["content"]
+    assert "Subagent listed the workspace twice" in requests[3][0]["content"]
+    assert sum(message.get("role") == "tool" for message in requests[3]) == 1
+    # Subagent observations stay transient: nothing reaches the workspace log.
+    assert memory.observations() == ""
+    assert memory.om._ephemeral == {}
 
 
 @pytest.mark.asyncio

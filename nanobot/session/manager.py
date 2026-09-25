@@ -216,14 +216,11 @@ class Session:
         self.messages.append(msg)
         self.updated_at = datetime.now()
 
-    def commit_summary_checkpoint(
-        self,
-        summary: str,
-        *,
-        insert_at: int | None = None,
-        last_active: datetime | None = None,
-    ) -> None:
-        """Replace replay before a hidden boundary while preserving the transcript."""
+    def commit_summary_checkpoint(self, *, insert_at: int | None = None) -> None:
+        """End replay at a hidden boundary; memory now holds everything before it.
+
+        The transcript itself is preserved for display and search.
+        """
         boundary = len(self.messages) if insert_at is None else insert_at
         self.messages.insert(boundary, {
             "role": "user",
@@ -231,10 +228,6 @@ class Session:
             HIDDEN_HISTORY_META: True,
             "timestamp": datetime.now().isoformat(),
         })
-        self.metadata["_last_summary"] = {
-            "text": summary,
-            "last_active": (last_active or self.updated_at).isoformat(),
-        }
         self.last_archived = boundary
 
     def get_history(
@@ -1558,6 +1551,29 @@ class SessionManager:
     def get_cached(self, key: str) -> Session | None:
         """Return a cached session without creating or loading one from disk."""
         return self._cached(key)
+
+    def session_keys_modified_since(self, since: float) -> list[str]:
+        """Keys of sessions changed after the POSIX time *since*, on disk or in cache."""
+        keys: set[str] = {
+            key
+            for key, session in [*self._cache.items(), *self._overflow_cache.items()]
+            if session.updated_at.timestamp() > since
+        }
+        if self._store is self._jsonl_store:
+            for path in self.sessions_dir.glob("*.jsonl"):
+                try:
+                    if path.stat().st_mtime <= since:
+                        continue
+                except FileNotFoundError:
+                    continue
+                if (key := self._session_key_from_path(path)) is not None:
+                    keys.add(key)
+        else:
+            for info in self._store.list_sessions():
+                with suppress(ValueError):
+                    if datetime.fromisoformat(info["updated_at"]).timestamp() > since:
+                        keys.add(info["key"])
+        return sorted(keys)
 
     def set_delete_observer(self, observer: Callable[[str], None]) -> None:
         """Observe explicit session deletion for process-local state cleanup."""

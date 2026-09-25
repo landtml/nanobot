@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.memory import Memory
 from nanobot.runtime_context import RuntimeContextBlock
 
 
@@ -19,6 +20,14 @@ class _FakeDatetime(real_datetime):
     @classmethod
     def now(cls, tz=None):  # type: ignore[override]
         return cls.current
+
+
+def _memory(workspace: Path) -> Memory:
+    from unittest.mock import MagicMock
+
+    from nanobot.session.manager import SessionManager
+
+    return Memory(workspace, SessionManager(workspace), runtime=MagicMock(), timezone="UTC")
 
 
 def _make_workspace(tmp_path: Path) -> Path:
@@ -74,7 +83,7 @@ def test_selected_project_path_follows_shared_cache_prefix(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("selected_project", [False, True])
-def test_system_prompt_reflects_current_dream_memory_contract(tmp_path, selected_project) -> None:
+def test_system_prompt_reflects_observational_memory_contract(tmp_path, selected_project) -> None:
     workspace = _make_workspace(tmp_path)
     builder = ContextBuilder(workspace)
     project = tmp_path / "project" if selected_project else workspace
@@ -82,11 +91,10 @@ def test_system_prompt_reflects_current_dream_memory_contract(tmp_path, selected
 
     prompt = builder.build_system_prompt(workspace=project)
 
-    assert "memory/history.jsonl" in prompt
-    assert (
-        "Only Dream memory-consolidation tasks may edit the profile and long-term memory files "
-        "listed above."
-    ) in prompt
+    assert "memory/observations.md" in prompt
+    assert "history.jsonl" not in prompt
+    assert "Dream" not in prompt
+    assert "Never edit the memory files" in prompt
 
 
 def test_provider_context_appended_after_user_content(tmp_path) -> None:
@@ -242,42 +250,28 @@ def test_fresh_workspace_omits_default_prompt_scaffolding(tmp_path) -> None:
     assert prompt.count("Do not use the 'message' tool for normal replies") == 1
 
 
-def test_template_memory_md_is_skipped(tmp_path) -> None:
-    """MEMORY.md matching the bundled template should not inject the Memory section."""
+def test_fresh_workspace_has_no_memory_section(tmp_path) -> None:
+    """Nothing observed yet means no memory section at all."""
     workspace = _make_workspace(tmp_path)
     from nanobot.utils.helpers import sync_workspace_templates
     sync_workspace_templates(workspace, silent=True)
 
-    builder = ContextBuilder(workspace)
-    prompt = builder.build_system_prompt()
+    builder = ContextBuilder(workspace, memory=_memory(workspace))
+    prompt = builder.build_system_prompt(memory_key="cli:test")
 
-    # This block is produced only when populated long-term memory is injected.
-    assert "# Memory\n\n## Long-term Memory" not in prompt
-    assert "This file is automatically updated by nanobot" not in prompt
+    assert "# Memory" not in prompt
+    assert not (workspace / "memory" / "MEMORY.md").exists()
 
 
-def test_customized_memory_md_is_injected(tmp_path, monkeypatch) -> None:
-    """A Dream-populated MEMORY.md should be injected normally."""
+def test_observations_are_injected_last(tmp_path) -> None:
     workspace = _make_workspace(tmp_path)
-    from nanobot.utils.helpers import sync_workspace_templates
-    sync_workspace_templates(workspace, silent=True)
+    memory = _memory(workspace)
+    memory.replace_observations("Date: Feb 24, 2026\n* 🔴 (13:00) User prefers dark mode")
+    builder = ContextBuilder(workspace, memory=memory)
 
-    (workspace / "memory" / "MEMORY.md").write_text(
-        "# Long-term Memory\n\nUser prefers dark mode.\n", encoding="utf-8"
-    )
+    prompt = builder.build_system_prompt(memory_key="cli:test")
 
-    builder = ContextBuilder(workspace)
-    read_memory = builder.memory.read_memory
-    calls = 0
-
-    def tracked_read_memory() -> str:
-        nonlocal calls
-        calls += 1
-        return read_memory()
-
-    monkeypatch.setattr(builder.memory, "read_memory", tracked_read_memory)
-    prompt = builder.build_system_prompt()
-
-    assert "# Memory\n\n## Long-term Memory" in prompt
-    assert "User prefers dark mode" in prompt
-    assert calls == 1
+    memory_section = prompt.rsplit("\n\n---\n\n", 1)[-1]
+    assert memory_section.startswith("# Memory\n")
+    assert "User prefers dark mode" in memory_section
+    assert "<observations>" in memory_section

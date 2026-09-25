@@ -7,7 +7,7 @@ import { TokenUsageDetails } from "@/components/settings/TokenUsageDetails";
 import { SettingsHint } from "@/components/settings/shared/SettingsHint";
 
 type Usage = NonNullable<SettingsPayload["usage"]>;
-const SOURCE_KEYS = ["user", "api", "cron", "dream", "system"] as const;
+const SOURCE_KEYS = ["user", "api", "cron", "memory", "system"] as const;
 const SEGMENT_CLASSES = [
   "bg-orange-100 text-orange-500 dark:bg-orange-400/15 dark:text-orange-400",
   "bg-neutral-300 dark:bg-neutral-500",
@@ -71,7 +71,7 @@ export function TokenUsageCard({ usage, timeZone }: { usage?: Usage; timeZone?: 
     user: t("settings.usage.sources.user", { defaultValue: "Chat" }),
     api: t("settings.usage.sources.api", { defaultValue: "API" }),
     cron: t("settings.usage.sources.cron", { defaultValue: "Automations" }),
-    dream: t("settings.usage.sources.dream", { defaultValue: "Memory" }),
+    memory: t("settings.usage.sources.memory", { defaultValue: "Memory" }),
     system: t("settings.usage.sources.system", { defaultValue: "Auxiliary calls" }),
     other: t("settings.usage.unclassified", { defaultValue: "Unclassified" }),
   };

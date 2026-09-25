@@ -31,7 +31,8 @@ export const RUNTIME_CONFIG_GROUPS: { id: string; page: RuntimeConfigPage; enabl
 export const RUNTIME_CONFIG_FIELDS: RuntimeConfigField[] = [
   { group: "identity", path: "agents.defaults.timezone_mode", kind: "toggle", options: ["manual", "auto"] },
   { group: "identity", path: "agents.defaults.timezone", kind: "text", when: { path: "agents.defaults.timezone_mode", value: "manual" } },
-  { group: "memory", path: "agents.defaults.dream.enabled", kind: "boolean" },
+  { group: "memory", path: "agents.defaults.memory.message_tokens", kind: "number", min: 1000 },
+  { group: "memory", path: "agents.defaults.memory.observation_tokens", kind: "number", min: 1000 },
   { group: "execution", path: "agents.defaults.provider_retry_mode", kind: "toggle", options: ["standard", "persistent"] },
   { group: "execution", path: "agents.defaults.max_tool_iterations", kind: "number", min: 1 },
   { group: "execution", path: "agents.defaults.max_concurrent_subagents", kind: "number", min: 1 },

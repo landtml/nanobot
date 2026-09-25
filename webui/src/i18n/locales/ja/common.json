@@ -138,7 +138,8 @@
       "fields": {
         "agents_defaults_timezone_mode": {"label": "システムのタイムゾーンを使用", "help": "オフにすると手動でタイムゾーンを選択できます。"},
         "agents_defaults_timezone": {"label": "タイムゾーン", "help": "タイムゾーンを選択します。UTC との時差は現在の日付に基づきます。"},
-        "agents_defaults_dream_enabled": {"label": "記憶の整理", "help": "会話の有用な情報を自動で整理します。オフにしても既存の記憶は使用できます。"},
+        "agents_defaults_memory_message_tokens": {"label": "観察のしきい値（トークン）", "help": "未観察の会話がこのトークン数に達すると観察します。既定値 30,000。"},
+        "agents_defaults_memory_observation_tokens": {"label": "記憶の圧縮しきい値（トークン）", "help": "観察ログがこのサイズを超えると振り返りで圧縮します。既定値 40,000。"},
         "gateway_heartbeat_enabled": {"label": "定期チェック", "help": "HEARTBEAT.md のタスクを定期的に確認します。"},
         "gateway_heartbeat_interval_s": {"label": "チェック間隔（秒）", "help": "ゲートウェイの起動時に定期チェックを予約します。"},
         "agents_defaults_max_tool_iterations": {"label": "1 ターンのモデル・ツール間のやり取り上限", "help": "1 ターンでモデルとツールがやり取りする回数の上限です。"},
@@ -181,7 +182,7 @@
       "groups": {
         "chat": {"title": "WebUI のチャット権限", "help": "ローカルサービスへのアクセスとチャットの既定の権限。"},
         "identity": {"title": "タイムゾーン", "help": "予約タスクのタイムゾーンを選択します。"},
-        "memory": {"title": "記憶", "help": "記憶の自動整理を有効または無効にします。"},
+        "memory": {"title": "記憶", "help": "観察メモリは長い会話を日付付きの観察にまとめ、すべてのチャットで共有します。"},
         "heartbeat": {"title": "定期チェックのスケジュール", "help": "組み込みの定期タスクチェックを設定します。"},
         "execution": {"title": "エージェントの実行制限", "help": "ツールの実行と再試行の動作。"},
         "sessions": {"title": "会話", "help": "プラットフォーム間で会話を共有します。"},
@@ -504,7 +505,7 @@
         "user": "チャット",
         "api": "API",
         "cron": "自動タスク",
-        "dream": "メモリ整理",
+        "memory": "メモリ整理",
         "system": "補助処理"
       }
     },
@@ -1528,21 +1529,17 @@
             "title": "会話履歴を表示",
             "description": "保存済みの直近 N 件の会話メッセージを表示します。"
           },
-          "dream": {
-            "title": "Dream を実行",
-            "description": "メモリ統合を手動で開始します。"
+          "memory": {
+            "title": "メモリ",
+            "description": "nanobot が覚えている内容を表示します。`/memory reflect` で今すぐ記憶を圧縮します。"
           },
-          "dream_log": {
-            "title": "Dream ログを表示",
-            "description": "直近の Dream 統合で変更された内容を表示します。"
+          "memory_log": {
+            "title": "メモリログ",
+            "description": "最新のメモリ変更を表示します。"
           },
-          "dream_restore": {
+          "memory_restore": {
             "title": "メモリを復元",
-            "description": "以前の Dream スナップショットへメモリを戻します。"
-          },
-          "dream_prompt": {
-            "title": "Dream の記憶",
-            "description": "このワークスペースの記憶を Dream がどう整理するかを設定します。"
+            "description": "メモリを以前のバージョンに戻します。"
           },
           "goal": {
             "title": "長期目標",

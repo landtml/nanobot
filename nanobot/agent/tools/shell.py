@@ -222,14 +222,13 @@ class ExecTool(Tool):
             r">\s*/dev/sd",                  # write to disk
             r"\b(shutdown|reboot|poweroff)\b",  # system power
             r":\(\)\s*\{.*\};\s*:",          # fork bomb
-            # Block writes to nanobot internal state files (#2989).
-            # history.jsonl / .dream_cursor are managed by append_history();
-            # direct writes corrupt the cursor format and crash /dream.
-            r">>?\s*\S*(?:history\.jsonl|\.dream_cursor)",            # > / >> redirect
-            r"\btee\b[^|;&<>]*(?:history\.jsonl|\.dream_cursor)",     # tee / tee -a
-            r"\b(?:cp|mv)\b(?:\s+[^\s|;&<>]+)+\s+\S*(?:history\.jsonl|\.dream_cursor)",  # cp/mv target
-            r"\bdd\b[^|;&<>]*\bof=\S*(?:history\.jsonl|\.dream_cursor)",  # dd of=
-            r"\bsed\s+-i[^|;&<>]*(?:history\.jsonl|\.dream_cursor)",  # sed -i
+            # Block writes to nanobot's memory files (#2989). Observational
+            # memory owns them; direct edits race its versioned, locked writes.
+            r">>?\s*\S*(?:observations\.md|observational_memory\.json)",            # > / >> redirect
+            r"\btee\b[^|;&<>]*(?:observations\.md|observational_memory\.json)",     # tee / tee -a
+            r"\b(?:cp|mv)\b(?:\s+[^\s|;&<>]+)+\s+\S*(?:observations\.md|observational_memory\.json)",  # cp/mv target
+            r"\bdd\b[^|;&<>]*\bof=\S*(?:observations\.md|observational_memory\.json)",  # dd of=
+            r"\bsed\s+-i[^|;&<>]*(?:observations\.md|observational_memory\.json)",  # sed -i
         ]
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace

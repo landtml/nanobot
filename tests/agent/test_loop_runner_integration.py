@@ -47,6 +47,7 @@ def _make_loop(tmp_path):
 
     with patch("nanobot.agent.loop.ContextBuilder"), \
          patch("nanobot.agent.loop.SessionManager"), \
+         patch("nanobot.agent.loop.Memory", autospec=True), \
          patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
         mock_sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
         loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path)
@@ -688,7 +689,7 @@ async def test_subagent_max_iterations_announces_existing_fallback(tmp_path, mon
         workspace=tmp_path,
         bus=bus,
         max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-        consolidator=MagicMock(),
+        memory=MagicMock(),
         max_iterations=2,
     )
     mgr._announce_result = AsyncMock()

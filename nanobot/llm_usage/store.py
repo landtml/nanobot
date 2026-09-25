@@ -369,12 +369,15 @@ class LLMUsageStore:
         timezone_name: str,
     ) -> list[dict[str, Any]]:
         query = f"""
-            SELECT llm_usage_local_day(started_at_ms, ?) AS date, source,
+            SELECT llm_usage_local_day(started_at_ms, ?) AS date,
+                   -- Calls recorded by Dream, the memory system before
+                   -- Observational Memory, count as memory.
+                   CASE source WHEN 'dream' THEN 'memory' ELSE source END AS bucket,
                    {_AGGREGATE_SQL}
             FROM llm_calls
             WHERE started_at_ms >= ? AND started_at_ms < ?
-            GROUP BY date, source
-            ORDER BY date, source
+            GROUP BY date, bucket
+            ORDER BY date, bucket
         """
         rows = connection.execute(
             query,
@@ -392,7 +395,7 @@ class LLMUsageStore:
             )
             for key, value in values.items():
                 aggregate[key] += value
-            aggregate["sources"][str(row["source"])] = values
+            aggregate["sources"][str(row["bucket"])] = values
         return list(by_date.values())
 
     @staticmethod

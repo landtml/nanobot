@@ -26,6 +26,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
 
+from nanobot.agent.observational_memory.store import ObservationStore
 from nanobot.command.builtin import builtin_command_palette
 from nanobot.cron.session_turns import is_bound_cron_job
 from nanobot.cron.types import CronJob, CronSchedule
@@ -830,7 +831,9 @@ class GatewayHTTPHandler:
         )
         if session is None:
             return _http_error(404, "session not found")
-        return _http_json_response(session_context_payload(session))
+        return _http_json_response(session_context_payload(
+            session, ObservationStore(self.session_manager.workspace),
+        ))
 
     async def _handle_sessions_list(self, request: WsRequest) -> Response:
         if not self.check_api_token(request):

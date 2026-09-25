@@ -138,7 +138,8 @@
       "fields": {
         "agents_defaults_timezone_mode": {"label": "Gunakan zona waktu sistem", "help": "Nonaktifkan untuk memilih zona waktu secara manual."},
         "agents_defaults_timezone": {"label": "Zona waktu", "help": "Pilih zona waktu. Selisih waktu dari UTC mengikuti tanggal saat ini."},
-        "agents_defaults_dream_enabled": {"label": "Penataan memori", "help": "Menata informasi berguna dari percakapan secara otomatis. Memori yang ada tetap digunakan saat dinonaktifkan."},
+        "agents_defaults_memory_message_tokens": {"label": "Amati setelah (token)", "help": "Token percakapan yang belum diamati yang memicu pengamatan. Bawaan 30.000."},
+        "agents_defaults_memory_observation_tokens": {"label": "Ringkas memori di atas (token)", "help": "Ukuran log pengamatan yang memicu refleksi. Bawaan 40.000."},
         "gateway_heartbeat_enabled": {"label": "Pemeriksaan berkala", "help": "Memeriksa tugas di HEARTBEAT.md secara berkala."},
         "gateway_heartbeat_interval_s": {"label": "Interval pemeriksaan (detik)", "help": "Gateway menjadwalkan pemeriksaan berkala saat dimulai."},
         "agents_defaults_max_tool_iterations": {"label": "Batas iterasi alat per giliran", "help": "Jumlah maksimum interaksi model dan alat dalam satu giliran."},
@@ -181,7 +182,7 @@
       "groups": {
         "chat": {"title": "Izin chat WebUI", "help": "Akses layanan lokal dan izin chat default."},
         "identity": {"title": "Zona waktu", "help": "Pilih zona waktu untuk tugas terjadwal."},
-        "memory": {"title": "Memori", "help": "Aktifkan atau nonaktifkan penataan memori otomatis."},
+        "memory": {"title": "Memori", "help": "Memori observasional mengubah percakapan panjang menjadi pengamatan bertanggal yang dibagikan di semua obrolan."},
         "heartbeat": {"title": "Jadwal pemeriksaan berkala", "help": "Atur pemeriksaan tugas berkala bawaan."},
         "execution": {"title": "Batas agen", "help": "Eksekusi alat dan perilaku percobaan ulang."},
         "sessions": {"title": "Percakapan", "help": "Bagikan percakapan antarplatform."},
@@ -504,7 +505,7 @@
         "user": "Chat",
         "api": "API",
         "cron": "Otomasi",
-        "dream": "Penataan memori",
+        "memory": "Penataan memori",
         "system": "Panggilan pendukung"
       }
     },
@@ -1528,21 +1529,17 @@
             "title": "Tampilkan riwayat",
             "description": "Cetak N pesan percakapan tersimpan terbaru."
           },
-          "dream": {
-            "title": "Jalankan Dream",
-            "description": "Picu konsolidasi memori secara manual."
+          "memory": {
+            "title": "Memori",
+            "description": "Tampilkan apa yang diingat nanobot; `/memory reflect` meringkas memori sekarang."
           },
-          "dream_log": {
-            "title": "Tampilkan log Dream",
-            "description": "Tampilkan perubahan dari konsolidasi Dream terakhir."
+          "memory_log": {
+            "title": "Log memori",
+            "description": "Tampilkan perubahan memori terbaru."
           },
-          "dream_restore": {
+          "memory_restore": {
             "title": "Pulihkan memori",
-            "description": "Kembalikan memori ke snapshot Dream sebelumnya."
-          },
-          "dream_prompt": {
-            "title": "Memori Dream",
-            "description": "Atur cara Dream menyusun memori ruang kerja ini."
+            "description": "Kembalikan memori ke versi sebelumnya."
           },
           "goal": {
             "title": "Tujuan jangka panjang",

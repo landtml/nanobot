@@ -478,7 +478,7 @@ async def test_temporary_chat_is_transient_and_discarded(bus, tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("content", ["/goal private", "/trigger later", "/dream"])
+@pytest.mark.parametrize("content", ["/goal private", "/trigger later", "/memory reflect"])
 async def test_temporary_chat_rejects_persistent_commands(bus, tmp_path, content) -> None:
     sessions = SessionManager(tmp_path)
     channel = WebSocketChannel(
@@ -5798,7 +5798,7 @@ async def test_webui_thread_diagnostics_hash_session_key(tmp_path, monkeypatch) 
 
 
 @pytest.mark.asyncio
-async def test_handle_session_context_get_reads_detached_session() -> None:
+async def test_handle_session_context_get_reads_detached_session(tmp_path) -> None:
     from urllib.parse import quote
 
     from websockets.datastructures import Headers
@@ -5818,6 +5818,7 @@ async def test_handle_session_context_get_reads_detached_session() -> None:
         metadata={"_last_usage": usage.to_dict()},
     )
     manager = MagicMock()
+    manager.workspace = tmp_path
     manager.read_session_snapshot.return_value = session
     gateway = _basic_handler(MagicMock(), session_manager=manager)
     gateway.tokens.api_tokens["tok"] = time.monotonic() + 300.0
@@ -5832,6 +5833,7 @@ async def test_handle_session_context_get_reads_detached_session() -> None:
     assert response.status_code == 200
     body = json.loads(response.body.decode())
     assert body["replay_messages"] == 1
+    assert body["observations"] is None
     assert body["last_usage"] == {
         "prompt_tokens": 12,
         "completion_tokens": 3,

@@ -37,4 +37,4 @@ Built-in skills live in `nanobot/skills/` (markdown + YAML frontmatter format). 
 
 ## Atomic Session Writes
 
-`agent/memory.py` writes `history.jsonl` atomically (temp file + fsync + rename + directory fsync). This guarantees durability across crashes. Do not replace this with a plain `open(..., "w")` write.
+`agent/observational_memory/store.py` writes `memory/observations.md` and `memory/observational_memory.json` atomically (`atomic_write_lines`: temp file + fsync + rename + directory fsync), under a file lock, and only when the stored revision has not moved. This guarantees durability across crashes and keeps a CLI and a gateway sharing one workspace from overwriting each other. Do not replace this with a plain `open(..., "w")` write.

@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from dulwich.refs import Ref
     from dulwich.repo import Repo
 
-# Cap on the unified-diff block embedded in Dream commit messages. Memory files
+# Cap on the unified-diff block in working-tree summaries. Memory files
 # are tiny in practice, but a pathological rewrite must not blow up the audit
 # record. The structured per-file summary is always emitted in full regardless.
 _WORKING_TREE_DIFF_MAX_CHARS = 6000
@@ -79,22 +79,7 @@ class GitStore:
 
             porcelain.init(str(self._workspace))
 
-            # Write .gitignore (merge with existing if present)
-            gitignore = self._workspace / ".gitignore"
-            dream_entries = self._build_gitignore()
-            if gitignore.exists():
-                existing = gitignore.read_text(encoding="utf-8")
-                existing_lines = set(existing.splitlines())
-                new_lines = [
-                    line
-                    for line in dream_entries.splitlines()
-                    if line not in existing_lines
-                ]
-                if new_lines:
-                    merged = existing.rstrip("\n") + "\n" + "\n".join(new_lines) + "\n"
-                    gitignore.write_text(merged, encoding="utf-8")
-            else:
-                gitignore.write_text(dream_entries, encoding="utf-8")
+            self._merge_gitignore()
 
             # Ensure tracked files exist (touch them if missing) so the initial
             # commit has something to track.
@@ -112,13 +97,44 @@ class GitStore:
             porcelain.commit(
                 str(self._workspace),
                 message=b"init: nanobot memory store",
-                author=b"nanobot <nanobot@dream>",
-                committer=b"nanobot <nanobot@dream>",
+                author=b"nanobot <nanobot@memory>",
+                committer=b"nanobot <nanobot@memory>",
             )
             logger.info("Git store initialized at {}", self._workspace)
             return True
         except Exception as exc:
             raise GitStoreError(f"Git store init failed for {self._workspace}") from exc
+
+    def _merge_gitignore(self) -> bool:
+        """Add this store's entries to the workspace .gitignore; True if it changed."""
+        gitignore = self._workspace / ".gitignore"
+        entries = self._build_gitignore()
+        if not gitignore.exists():
+            gitignore.write_text(entries, encoding="utf-8")
+            return True
+        existing = gitignore.read_text(encoding="utf-8")
+        existing_lines = set(existing.splitlines())
+        new_lines = [line for line in entries.splitlines() if line not in existing_lines]
+        if not new_lines:
+            return False
+        gitignore.write_text(
+            existing.rstrip("\n") + "\n" + "\n".join(new_lines) + "\n", encoding="utf-8",
+        )
+        return True
+
+    def ensure_tracked(self) -> None:
+        """Start tracking files added to ``tracked_files`` since the repo was created."""
+        if not self.is_initialized():
+            return
+        try:
+            self._merge_gitignore()
+            for rel in self._tracked_files:
+                path = self._workspace / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if not path.exists():
+                    path.write_text("", encoding="utf-8")
+        except OSError as exc:
+            raise GitStoreError(f"Git store tracking update failed for {self._workspace}") from exc
 
     # -- daily operations ------------------------------------------------------
 
@@ -151,8 +167,8 @@ class GitStore:
             sha_bytes = porcelain.commit(
                 str(self._workspace),
                 message=msg_bytes,
-                author=b"nanobot <nanobot@dream>",
-                committer=b"nanobot <nanobot@dream>",
+                author=b"nanobot <nanobot@memory>",
+                committer=b"nanobot <nanobot@memory>",
             )
             if cast(object, sha_bytes) is None:
                 return None

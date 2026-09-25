@@ -1,20 +1,30 @@
 ---
 name: memory
-description: Search past conversations in the agent's history log.
+description: Recall past conversations beyond the observations in your memory section.
 ---
 
 # Memory
 
-## Search Past Events
+nanobot remembers automatically. When a conversation grows long, an observer
+condenses it into dated observations; they appear in your memory section,
+newest last, and earlier messages leave the conversation. You never need to
+save anything yourself, and you must not edit the memory files.
 
-Search the exact `History log` path from the system prompt with `grep`; a project-relative
-`memory/history.jsonl` may belong to a different workspace. The log is append-only JSONL,
-with `cursor`, `timestamp`, and `content` per entry, and is not loaded into context.
+## When the observations are not enough
 
-Start broad searches with `output_mode="count"`, then narrow by topic or date and request
-matching content. Use `fixed_strings=true` for literal timestamps or JSON fragments.
-Page long results with `head_limit` / `offset` and use `context_before` / `context_after`
-when nearby entries matter.
+Observations keep facts, decisions and outcomes, not exact wording. To recover
+details from an earlier conversation:
 
-Example (replace `<history-log-path>` with the path from the system prompt):
-`grep(pattern="project-name", path="<history-log-path>", output_mode="content", case_insensitive=true, head_limit=20)`
+1. `search_sessions(query="...")` finds past sessions by title or message text.
+2. `read_session(...)` reads the matching session for exact wording, numbers or
+   tool output.
+
+To search the full observation log itself, `grep` the `Memory` path from the
+system prompt, for example:
+`grep(pattern="project-name", path="<memory-path>", output_mode="content", case_insensitive=true)`
+
+## Reading dates
+
+Observations are grouped under `Date:` headers with 24-hour times, and relative
+annotations such as "(2 weeks ago)" are computed from today. When facts
+conflict, the most recent observation wins.

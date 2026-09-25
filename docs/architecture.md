@@ -31,7 +31,7 @@ Main files:
 | Provider/tool conversation loop | `nanobot/agent/runner.py` |
 | Context construction | `nanobot/agent/context.py` |
 | Session storage and compaction | `nanobot/session/manager.py` |
-| Long-term memory and Dream | `nanobot/agent/memory.py` |
+| Long-term memory | `nanobot/agent/memory.py`, `nanobot/agent/observational_memory/` |
 
 ## Agent Loop vs Agent Runner
 
@@ -101,7 +101,7 @@ Channels are discovered by scanning self-contained packages under `nanobot/chann
 - enabled chat channels;
 - the WebSocket channel when configured;
 - workspace-scoped cron service;
-- system jobs such as Dream and heartbeat;
+- system jobs such as heartbeat;
 - the health endpoint on `gateway.port`.
 
 The packaged WebUI is served by the WebSocket channel, not the health endpoint:
@@ -176,16 +176,23 @@ explicit; do not treat the entire agent workspace as an allowed root.
 
 ## Memory and Sessions
 
-Session history is the near-term conversation replay. Memory is the longer-term workspace state.
+Session history is the full conversation; its unobserved part is replayed to
+the model. Memory is Observational Memory, shared by every conversation in the
+workspace.
 
 | Store | File area |
 |---|---|
 | Session JSONL files | `<config-dir>/sessions/<workspace-id>/` |
-| Long-term memory | `<workspace>/memory/MEMORY.md` |
-| Consolidation source history | `<workspace>/memory/history.jsonl` |
+| Observation log | `<workspace>/memory/observations.md` |
+| Observation cursors and tasks | `<workspace>/memory/observational_memory.json` |
 | Bootstrap identity files | `<workspace>/SOUL.md`, `<workspace>/USER.md`, templates under `nanobot/templates/` |
 
-Dream is implemented in `nanobot/agent/memory.py` and scheduled by the runtime when enabled.
+`nanobot/agent/observational_memory/` is the engine, a port of Mastra's
+Observational Memory 1.1.0 held to it by golden tests. `nanobot/agent/memory.py`
+(`Memory`) wires it into the loop: it observes after replies in the background,
+serves the context governor as the compactor under context pressure, adds the
+memory block to the system prompt through `ContextBuilder`, and versions every
+change in the workspace git store.
 
 ## Security Boundaries
 

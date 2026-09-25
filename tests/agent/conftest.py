@@ -44,7 +44,6 @@ def make_loop(
     *,
     model: str = "test-model",
     context_window_tokens: int = 128_000,
-    session_ttl_minutes: int = 0,
     unified_session: bool = False,
     tools_config=None,
     model_presets: dict | None = None,
@@ -68,7 +67,6 @@ def make_loop(
         workspace=tmp_path,
         model=model,
         context_window_tokens=context_window_tokens,
-        session_ttl_minutes=session_ttl_minutes,
         unified_session=unified_session,
     )
     if tools_config is not None:
@@ -81,6 +79,7 @@ def make_loop(
     if patch_deps:
         with patch("nanobot.agent.loop.ContextBuilder"), \
              patch("nanobot.agent.loop.SessionManager"), \
+             patch("nanobot.agent.loop.Memory", autospec=True), \
              patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
             mock_sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
             return AgentLoop(**kwargs)

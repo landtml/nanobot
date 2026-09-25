@@ -29,6 +29,7 @@ def _make_loop():
 
     with patch("nanobot.agent.loop.ContextBuilder"), \
          patch("nanobot.agent.loop.SessionManager"), \
+         patch("nanobot.agent.loop.Memory", autospec=True), \
          patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
         mock_sub_mgr.return_value.close = AsyncMock()
         loop = AgentLoop(bus=bus, provider=provider, workspace=workspace)
@@ -242,7 +243,7 @@ class TestRestartCommand:
         }
         loop.sessions.get_or_create.return_value = session
         loop._start_time = time.time() - 125
-        loop.consolidator.estimate_session_prompt_tokens = MagicMock(
+        loop.estimate_session_prompt_tokens = MagicMock(
             return_value=(20500, "tiktoken")
         )
         loop.subagents.get_running_count_by_session.return_value = 0
@@ -267,7 +268,7 @@ class TestRestartCommand:
         assert "Uptime: 2m 5s" in response.content
         assert "Tasks: 0 active" in response.content
         assert response.metadata == {"render_as": "text"}
-        loop.consolidator.estimate_session_prompt_tokens.assert_called_once_with(
+        loop.estimate_session_prompt_tokens.assert_called_once_with(
             session,
             runtime=runtime,
         )
@@ -278,7 +279,7 @@ class TestRestartCommand:
         session = MagicMock()
         session.get_history.return_value = [{"role": "user"}]
         loop.sessions.get_or_create.return_value = session
-        loop.consolidator.estimate_session_prompt_tokens = MagicMock(
+        loop.estimate_session_prompt_tokens = MagicMock(
             return_value=(1000, "tiktoken")
         )
 
@@ -333,7 +334,7 @@ class TestRestartCommand:
             "_last_usage": LLMUsage.reported(input_tokens=1200, output_tokens=34).to_dict()
         }
         loop.sessions.get_or_create.return_value = session
-        loop.consolidator.estimate_session_prompt_tokens = MagicMock(
+        loop.estimate_session_prompt_tokens = MagicMock(
             return_value=(0, "none")
         )
         loop.subagents.get_running_count_by_session.return_value = 0

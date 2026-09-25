@@ -88,7 +88,7 @@ def _assembled_messages(
     builder: ContextBuilder,
     transcript_input: TranscriptInput,
 ) -> list[dict]:
-    return builder.build_transcript(transcript_input, include_memory=False)
+    return builder.build_transcript(transcript_input, durable_memory=False)
 
 
 def _mk_loop() -> AgentLoop:
@@ -555,9 +555,8 @@ def test_save_turn_commits_summary_boundary_without_rewriting_raw_history() -> N
     assert session.messages[1]["content"] == SUMMARY_CONTINUATION_TEXT
     assert session.messages[1]["_hidden_history"] is True
     assert session.last_archived == 1
-    assert session.metadata["_last_summary"]["text"] == (
-        "Current working-memory checkpoint."
-    )
+    # The summary itself lives in observational memory, not in session metadata.
+    assert "_last_summary" not in session.metadata
     assert [message["content"] for message in session.get_history()] == [
         "",
         "full current result",
@@ -2081,7 +2080,7 @@ async def test_system_subagent_followup_uses_common_turn_lifecycle(tmp_path: Pat
 
     for name in (
         "_restore_turn",
-        "_compact_session",
+        "_restore_memory",
         "_dispatch_command",
         "_build_turn",
         "_run_turn",
@@ -2123,7 +2122,7 @@ async def test_system_subagent_followup_uses_common_turn_lifecycle(tmp_path: Pat
 
     assert visited == [
         "_restore_turn",
-        "_compact_session",
+        "_restore_memory",
         "_dispatch_command",
         "_build_turn",
         "_run_turn",
@@ -2131,12 +2130,12 @@ async def test_system_subagent_followup_uses_common_turn_lifecycle(tmp_path: Pat
         "_prepare_outbound",
     ]
     logged = "\n".join(record["message"] for record in records)
-    for stage in ("restore", "compact", "command", "build", "run", "save", "respond"):
+    for stage in ("restore", "memory", "command", "build", "run", "save", "respond"):
         assert f"Stage {stage} completed in" in logged
     stage_records = [record for record in records if record["extra"].get("event") == "turn_stage"]
     assert {record["extra"]["stage"] for record in stage_records} == {
         "restore",
-        "compact",
+        "memory",
         "command",
         "build",
         "run",

@@ -173,29 +173,26 @@ async def test_exec_blocks_chained_internal_url():
     assert "Error" in result
 
 
-# --- #2989: block writes to nanobot internal state files -----------------
+# --- #2989: block writes to nanobot memory files -------------------------
 
 
 @pytest.mark.parametrize(
     "command",
     [
-        "cat foo >> history.jsonl",
-        "echo '{}' > history.jsonl",
-        "echo '{}' > memory/history.jsonl",
-        "echo '{}' > ./workspace/memory/history.jsonl",
-        "tee -a history.jsonl < foo",
-        "tee history.jsonl",
-        "cp /tmp/fake.jsonl history.jsonl",
-        "mv backup.jsonl memory/history.jsonl",
-        "dd if=/dev/zero of=memory/history.jsonl",
-        "sed -i 's/old/new/' history.jsonl",
-        "echo x > .dream_cursor",
-        "cp /tmp/x memory/.dream_cursor",
+        "cat foo >> observations.md",
+        "echo x > observations.md",
+        "echo x > memory/observations.md",
+        "echo '{}' > ./workspace/memory/observational_memory.json",
+        "tee -a memory/observations.md < foo",
+        "tee observational_memory.json",
+        "cp /tmp/fake.md memory/observations.md",
+        "mv backup.json memory/observational_memory.json",
+        "dd if=/dev/zero of=memory/observations.md",
+        "sed -i 's/old/new/' memory/observations.md",
     ],
 )
-
-def test_exec_blocks_writes_to_history_jsonl(command):
-    """Direct writes to history.jsonl / .dream_cursor must be blocked (#2989)."""
+def test_exec_blocks_writes_to_memory_files(command):
+    """Direct writes race Observational Memory's locked, versioned writes (#2989)."""
     tool = ExecTool()
     result = tool._guard_command(command, "/tmp")
     assert result is not None
@@ -205,18 +202,17 @@ def test_exec_blocks_writes_to_history_jsonl(command):
 @pytest.mark.parametrize(
     "command",
     [
-        "cat history.jsonl",
-        "wc -l history.jsonl",
-        "tail -n 5 history.jsonl",
-        "grep foo history.jsonl",
-        "cp history.jsonl /tmp/history.backup",
+        "cat memory/observations.md",
+        "wc -l memory/observations.md",
+        "tail -n 5 memory/observations.md",
+        "grep foo memory/observations.md",
+        "cp memory/observations.md /tmp/observations.backup",
         "ls memory/",
-        "echo history.jsonl",
+        "echo observations.md",
     ],
 )
-
-def test_exec_allows_reads_of_history_jsonl(command):
-    """Read-only access to history.jsonl must still be allowed."""
+def test_exec_allows_reads_of_memory_files(command):
+    """Read-only access to the observation log stays allowed."""
     tool = ExecTool()
     result = tool._guard_command(command, "/tmp")
     assert result is None

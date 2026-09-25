@@ -2,7 +2,7 @@
 
 ## Workspace Guidance
 
-Use this file for project-specific preferences, recurring workflow conventions, and instructions you want the agent to remember for this workspace. Keep durable facts about the user in `USER.md`, personality/style guidance in `SOUL.md`, and let nanobot's automatic memory keep track of past conversations.
+Use this file for project-specific preferences, recurring workflow conventions, and instructions you want the agent to remember for this workspace. Keep durable facts about the user in `USER.md`, personality/style guidance in `SOUL.md`, and long-term memory in `memory/MEMORY.md`.
 
 ## Scheduled Reminders
 
@@ -11,7 +11,7 @@ Use this file for project-specific preferences, recurring workflow conventions, 
 - Get USER_ID and CHANNEL from the current session (e.g., `8281248569` and `telegram` from `telegram:8281248569`).
 - Cron jobs run as scheduled turns in the origin chat/session and normally deliver the result back to that channel. Do not use cron for background checks that should stay silent when there is nothing useful to report; use `HEARTBEAT.md` instead.
 
-**Do NOT rely on memory for reminders** — remembering something won't trigger a notification.
+**Do NOT just write reminders to MEMORY.md** — that won't trigger actual notifications.
 
 ## Heartbeat Tasks
 

@@ -1453,7 +1453,8 @@ async def test_sessions_ingest_preserves_full_transcript(tmp_path):
     assert len(snapshot.messages) == 2_001
     assert snapshot.messages[0]["content"] == "message-0"
     assert snapshot.messages[-1]["content"] == "message-2000"
-    assert bot.memory.read_history(session_key="sdk:overflow") == []
+    # Ingesting is not observing: memory changes only when a model observes.
+    assert bot.memory.read() == ""
 
 
 @pytest.mark.asyncio
@@ -1596,52 +1597,67 @@ async def test_session_restore_validates_before_mutating_target(tmp_path):
     assert "title" not in target.metadata
 
 
-def test_memory_helpers_read_write_append_and_filter_history(tmp_path):
+def test_memory_helpers_read_write_and_status(tmp_path):
     config_path = _write_config(tmp_path)
     bot = Nanobot.from_config(config_path, workspace=tmp_path)
 
     assert bot.memory.read() == ""
-    bot.memory.write("# Memory\n- User likes concise APIs.")
+    bot.memory.write("Date: Jun 3, 2026\n* 🔴 (10:00) User likes concise APIs.")
     assert "concise APIs" in bot.memory.read()
+    assert "concise APIs" in (tmp_path / "memory" / "observations.md").read_text(encoding="utf-8")
 
-    c1 = bot.memory.append_history("general event")
-    c2 = bot.memory.append_history("session event", session_key="sdk:history")
+    status = bot.memory.status()
+    assert status.observation_tokens > 0
+    assert status.observation_threshold == 40_000
+    assert status.message_threshold == 30_000
+    assert status.generation == 0
 
-    all_entries = bot.memory.read_history()
-    assert [entry["cursor"] for entry in all_entries] == [c1, c2]
 
-    session_entries = bot.memory.read_history(session_key="sdk:history")
-    assert len(session_entries) == 1
-    assert session_entries[0]["content"] == "session event"
+_SDK_OBSERVATION = (
+    "<observations>\nDate: Jun 3, 2026\n* 🔴 (10:00) User greeted the SDK\n</observations>"
+)
+
+
+@pytest.mark.asyncio
+async def test_memory_helpers_observe_and_reflect(tmp_path):
+    config_path = _write_config(tmp_path)
+    bot = Nanobot.from_config(config_path, workspace=tmp_path)
+    await bot.sessions.ingest("sdk:history", [{"role": "user", "content": "hello"}])
+    complete = AsyncMock(return_value=_SDK_OBSERVATION)
+    bot._loop.memory._complete = complete  # type: ignore[method-assign]
+
+    assert await bot.memory.observe("sdk:history") is True
+    assert "User greeted the SDK" in bot.memory.read()
+    assert await bot.memory.observe("sdk:history") is False  # nothing new
+    assert complete.await_count == 1
+
+    complete.return_value = (
+        "<observations>\nDate: Jun 3, 2026\n* 🔴 (10:00) User said hello\n</observations>"
+    )
+    assert await bot.memory.reflect("keep greetings short") is True
+    assert "keep greetings short" in complete.await_args.kwargs["prompt"]
+    assert "User said hello" in bot.memory.read()
+    assert bot.memory.status().generation == 1
 
 
 @pytest.mark.asyncio
 async def test_runtime_helpers_expose_model_workspace_and_compact(tmp_path):
     config_path = _write_config(tmp_path)
     bot = Nanobot.from_config(config_path, workspace=tmp_path)
-    await bot.sessions.ingest("sdk:history", [{"role": "user", "content": "hello"}])
-    runtime = bot._loop.llm_runtime()
-    bot._loop.runtime_for_session = MagicMock(return_value=runtime)  # type: ignore[method-assign]
+    await bot.sessions.ingest("sdk:history", [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ])
+    bot._loop.memory._complete = AsyncMock(return_value=_SDK_OBSERVATION)  # type: ignore[method-assign]
 
-    compact_session = AsyncMock()
-    bot._loop.consolidator.compact_idle_session = compact_session
     snapshot = await bot.runtime.compact_session("sdk:history")
+
     assert snapshot.key == "sdk:history"
-    compact_session.assert_awaited_once_with(
-        "sdk:history",
-        runtime=runtime,
-    )
+    assert len(snapshot.messages) == 2  # the raw transcript is never rewritten
+    assert bot._loop.sessions.get_or_create("sdk:history").get_history() == []
+    assert "User greeted the SDK" in bot.memory.read()
     assert bot.runtime.model == bot._loop.model
     assert bot.runtime.workspace == tmp_path
-
-    bot._loop.consolidator.compact_idle_session = AsyncMock(return_value="Summary.")
-    summary = await bot.runtime.compact_idle_session("sdk:history", max_suffix=4)
-    assert summary == "Summary."
-    bot._loop.consolidator.compact_idle_session.assert_awaited_once_with(
-        "sdk:history",
-        runtime=runtime,
-        max_suffix=4,
-    )
 
 
 @pytest.mark.asyncio

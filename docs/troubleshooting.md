@@ -195,7 +195,7 @@ See [`configuration.md#langfuse-observability`](./configuration.md#langfuse-obse
 
 ## Gateway Problems
 
-`nanobot gateway` is required for WebUI, chat apps, heartbeat, Dream, and long-running channel connections.
+`nanobot gateway` is required for WebUI, chat apps, heartbeat, and long-running channel connections.
 
 Default ports:
 
@@ -338,7 +338,7 @@ See [`chat-apps.md`](./chat-apps.md) for channel-specific setup.
 | Symptom | Check |
 |---|---|
 | Conversation context seems wrong | Confirm the active workspace and session. WebUI chats and chat app threads may use different sessions. |
-| Memory does not update immediately | Dream consolidation is periodic; recent turns still live in session history. |
+| Memory does not update immediately | Conversations are observed once about 30,000 unobserved tokens accumulate; until then recent turns are replayed from session history. Use `/compact` to observe the current conversation now and `/memory` to check. |
 | Sessions disappear after changing `--config` | Sessions follow the config directory at `<config-dir>/sessions/<workspace-id>/`; use the original config path or copy that `sessions/` directory into the new config directory while nanobot is stopped. |
 | Sessions disappear after moving a workspace | Keep the workspace's `.nanobot/workspace-id` file with the move or backup. If it was lost, restore that marker from backup before starting nanobot. |
 | You want one shared session across devices | Set `agents.defaults.unifiedSession` intentionally; otherwise keep separate sessions. |

@@ -12,14 +12,13 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from loguru import logger
 
-from nanobot.agent.context import TranscriptInput
+from nanobot.agent.context import TranscriptInput, is_memory_prefix
 from nanobot.events import NO_EVENTS, ContextCompactionEvent, EventSink
 from nanobot.providers.base import (
     CONTEXT_SAFETY_BUFFER,
@@ -149,13 +148,11 @@ class ContextCompactionState:
             return transcript_builder(
                 replace(
                     transcript_input,
-                    history=[],
+                    # The system prompt re-reads memory, which now holds what was
+                    # just observed; only memory's own history prefix carries over.
+                    history=[m for m in transcript_input.history if is_memory_prefix(m)],
                     current_message=None,
                     media=None,
-                    session_summary={
-                        "text": summary,
-                        "last_active": datetime.now().astimezone().isoformat(),
-                    },
                     runtime_context_blocks=None,
                 )
             )
@@ -164,11 +161,7 @@ class ContextCompactionState:
             raw_messages=messages,
             accepted_messages=deepcopy(messages[:accepted_history_boundary]),
             raw_accepted_boundary=accepted_history_boundary,
-            active_summary=(
-                transcript_input.session_summary["text"]
-                if transcript_input.session_summary is not None
-                else None
-            ),
+            active_summary=None,
             summary_transcript_builder=build_summary_transcript,
             consolidate_history=consolidate_history,
             consolidate_provider_compaction=consolidate_provider_compaction,

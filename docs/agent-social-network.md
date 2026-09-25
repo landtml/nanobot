@@ -35,7 +35,7 @@ is:
 - reply through the configured network channel
 - use normal nanobot tools allowed by your configuration
 - keep session history for conversations that flow through the network
-- use Dream memory if memory is enabled for the workspace
+- share the workspace's memory with its other conversations
 
 ## Supported networks
 

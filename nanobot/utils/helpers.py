@@ -925,7 +925,7 @@ def build_status_content(
     last_out = last_usage.output_tokens if last_usage else 0
     cached = last_usage.cache_read_tokens if last_usage else None
     ctx_total = max(context_window_tokens, 0)
-    # Budget mirrors Consolidator formula: ctx_window - max_completion - _SAFETY_BUFFER
+    # Budget mirrors the context governor: ctx_window - max_completion - safety buffer
     ctx_budget = max(ctx_total - int(max_completion_tokens) - 1024, 1)
     ctx_pct = min(int((context_tokens_estimate / ctx_budget) * 100), 999) if ctx_budget > 0 else 0
     ctx_used_str = (
@@ -975,9 +975,8 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     for item in tpl.iterdir():
         if item.name.endswith(".md") and not item.name.startswith("."):
             _write(item, workspace / item.name)
-    _write(tpl / "memory" / "MEMORY.md", workspace / "memory" / "MEMORY.md")
     _write(tpl / "prompts" / "README.md", workspace / "prompts" / "README.md")
-    _write(None, workspace / "memory" / "history.jsonl")
+    (workspace / "memory").mkdir(exist_ok=True)
     (workspace / "skills").mkdir(exist_ok=True)
 
     if added and not silent:
@@ -988,17 +987,12 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
 
     # Initialize git for memory version control
     try:
+        from nanobot.agent.memory import MEMORY_TRACKED_FILES
         from nanobot.utils.gitstore import GitStore
 
-        gs = GitStore(
-            workspace,
-            tracked_files=[
-                "SOUL.md",
-                "USER.md",
-                "memory/MEMORY.md",
-            ],
-        )
-        gs.init()
+        gs = GitStore(workspace, tracked_files=MEMORY_TRACKED_FILES)
+        if not gs.init():
+            gs.ensure_tracked()
     except Exception:
         logger.exception("Failed to initialize git store for {}", workspace)
 

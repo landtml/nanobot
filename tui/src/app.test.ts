@@ -2973,7 +2973,7 @@ describe("NanobotTui layout", () => {
   test.each([
     ["succeeded", "Conversation compacted"],
     ["cancelled", "Conversation compaction cancelled"],
-  ] as const)("updates idle compaction in place to %s", async (phase, copy) => {
+  ] as const)("updates out-of-turn compaction in place to %s", async (phase, copy) => {
     setup = await createRenderer({ width: 80, height: 24, screenMode: "alternate-screen" })
     const app = mount(setup)
     const ui = app as unknown as {

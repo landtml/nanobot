@@ -1319,7 +1319,10 @@ class TestToolEventProgress:
             metadata=metadata,
         ))
 
-        assert scheduled == []
+        # Only the post-turn memory check is scheduled, never title generation.
+        assert [getattr(coro, "__qualname__", None) for coro in scheduled] == [
+            "Memory.after_turn",
+        ]
         provider.chat_stream_with_retry.assert_awaited_once()
         assert "title" not in session.metadata
 

@@ -38,6 +38,7 @@ def _make_loop(*, tools_config=None):
 
     with patch("nanobot.agent.loop.ContextBuilder"), \
          patch("nanobot.agent.loop.SessionManager"), \
+         patch("nanobot.agent.loop.Memory", autospec=True), \
          patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
         mock_sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
         loop = AgentLoop(bus=bus, provider=provider, workspace=workspace, tools_config=tools_config)
@@ -340,7 +341,6 @@ class TestDispatch:
     async def test_run_logs_and_continues_after_leaked_cancelled_error(self, monkeypatch):
         loop, bus = _make_loop()
         loop.aclose = AsyncMock()
-        loop.auto_compact.check_expired = MagicMock()
         warnings: list[str] = []
         calls = 0
 
@@ -547,7 +547,7 @@ class TestSubagentCancellation:
             workspace=tmp_path,
             bus=bus,
             max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-            consolidator=MagicMock(),
+            memory=MagicMock(),
         )
 
         async def fake_execute(self, **kwargs):
@@ -647,7 +647,7 @@ class TestSubagentCancellation:
             workspace=tmp_path,
             bus=bus,
             max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-            consolidator=MagicMock(),
+            memory=MagicMock(),
         )
         mgr._announce_result = AsyncMock()
 
@@ -696,7 +696,7 @@ class TestSubagentCancellation:
             workspace=tmp_path,
             bus=bus,
             max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-            consolidator=MagicMock(),
+            memory=MagicMock(),
         )
         mgr._announce_result = AsyncMock()
 

@@ -571,7 +571,7 @@ describe("Automation task list and detail sheet", () => {
     expect(screen.queryByText("No next run")).not.toBeInTheDocument();
   });
 
-  it.each(["heartbeat", "dream", "other-system-job"])("shows only actual task data for %s", (id) => {
+  it.each(["heartbeat", "maintenance", "other-system-job"])("shows only actual task data for %s", (id) => {
     renderDetail({ ...systemTask, id, name: id, state: { next_run_at_ms: now + 540_000 } });
     const dialog = screen.getByRole("dialog", { name: id });
     expect(dialog).toHaveClass("max-w-[440px]");

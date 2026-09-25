@@ -22,11 +22,10 @@ from loguru import logger
 
 from nanobot.agent import context as agent_context
 from nanobot.agent import model_presets as preset_helpers
-from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.context import ContextBuilder, PersistedPromptContextResolver, TranscriptInput
 from nanobot.agent.cron_turns import CronTurnCoordinator
 from nanobot.agent.hook import AgentHook, AgentTurnHookFactory
-from nanobot.agent.memory import Consolidator
+from nanobot.agent.memory import Memory
 from nanobot.agent.model_runtime import ModelRuntimeResolver
 from nanobot.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec
 from nanobot.agent.subagent import SubagentManager
@@ -90,14 +89,11 @@ from nanobot.session.recovery import (
     restore_pending_interruption,
     restore_runtime_checkpoint,
 )
-from nanobot.session.summary import (
-    SessionSummary,
-    SessionSummaryCheckpoint,
-)
+from nanobot.session.summary import SessionSummaryCheckpoint
 from nanobot.triggers.local_turns import LocalTriggerTurnCoordinator
 from nanobot.utils.cancellation import task_is_cancelling
 from nanobot.utils.document import reference_non_image_attachments
-from nanobot.utils.helpers import image_placeholder_text
+from nanobot.utils.helpers import estimate_prompt_tokens_chain, image_placeholder_text
 from nanobot.utils.llm_runtime import LLMRuntime
 from nanobot.utils.progress_events import output_events
 from nanobot.utils.runtime import (
@@ -108,6 +104,7 @@ if TYPE_CHECKING:
     from nanobot.config.schema import (
         ChannelsConfig,
         Config,
+        MemoryConfig,
         ProviderConfig,
         ToolsConfig,
     )
@@ -159,7 +156,6 @@ class TurnContext:
     on_runtime_admitted: Callable[[LLMRuntime], Awaitable[None]] | None = None
 
     pending_queue: asyncio.Queue[InboundMessage] | None = None
-    pending_summary: SessionSummary | None = None
     summary_checkpoint: SessionSummaryCheckpoint | None = None
     provider_compaction_applied: bool = False
 
@@ -244,11 +240,36 @@ class AgentLoop:
             self._publish_runtime_selection(runtime)
         return runtime
 
-    def dream_runtime(self) -> LLMRuntime | None:
-        """Resolve the optional preset used for Dream without changing defaults."""
-        if not self.dream_model_preset:
-            return None
-        return self.runtime_resolver.resolve_preset(self.dream_model_preset)
+    def estimate_session_prompt_tokens(
+        self,
+        session: Session,
+        *,
+        runtime: LLMRuntime,
+    ) -> tuple[int, str]:
+        """Estimate the next request for *session*: prompt, memory, replay and tools."""
+        durable = session.policy.persist
+        history = [
+            *self.memory.history_prefix(session.key, durable=durable),
+            *session.get_history(),
+        ]
+        channel, workspace = self._prompt_context(session)
+        probe = self.context.build_messages(
+            history=history,
+            current_message="[token-probe]",
+            channel=channel,
+            memory_key=session.key,
+            workspace=workspace,
+            durable_memory=durable,
+        )
+        return estimate_prompt_tokens_chain(
+            runtime.provider, runtime.model, probe, self.tools.get_definitions(),
+        )
+
+    def memory_runtime(self) -> LLMRuntime:
+        """Resolve the model that observes and reflects, without changing defaults."""
+        if self.memory_model_preset:
+            return self.runtime_resolver.resolve_preset(self.memory_model_preset)
+        return self.runtime_resolver.runtime
 
     _RUNTIME_CHECKPOINT_KEY = "runtime_checkpoint"
     _PENDING_USER_TURN_KEY = "pending_user_turn"
@@ -273,7 +294,6 @@ class AgentLoop:
         tool_registry: ToolRegistry | None = None,
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
-        session_ttl_minutes: int = 0,
         hooks: list[AgentHook] | None = None,
         hook_factories: list[AgentTurnHookFactory] | None = None,
         unified_session: bool = False,
@@ -286,13 +306,12 @@ class AgentLoop:
         model_presets: dict[str, ModelPresetConfig] | None = None,
         preset_catalog_loader: preset_helpers.PresetCatalogLoader | None = None,
         model_preset: str | None = None,
-        dream_model_preset: str | None = None,
+        memory_config: MemoryConfig | None = None,
         preset_snapshot_loader: preset_helpers.PresetSnapshotLoader | None = None,
         turn_delivery_factory: TurnDeliveryFactory | None = None,
         runtime_model_publisher: Callable[[str, str | None], None] | None = None,
         restart_mode: str = "auto",
         local_trigger_store: LocalTriggerStore | None = None,
-        idle_compact_check_interval_seconds: int = 0,
         recovery_admission: RecoveryAdmission | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
@@ -335,7 +354,7 @@ class AgentLoop:
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
         )
-        self.dream_model_preset = dream_model_preset
+        self.memory_model_preset = memory_config.model_override if memory_config else None
         self.max_tool_result_chars = (
             max_tool_result_chars
             if max_tool_result_chars is not None
@@ -366,8 +385,20 @@ class AgentLoop:
         self._extra_hooks: list[AgentHook] = hooks or []
         self._hook_factories: list[AgentTurnHookFactory] = hook_factories or []
 
-        self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
         self.sessions = session_manager or SessionManager(workspace)
+        self.memory = Memory(
+            workspace,
+            self.sessions,
+            runtime=self.memory_runtime,
+            config=memory_config,
+            timezone=timezone,
+        )
+        self.context = ContextBuilder(
+            workspace,
+            timezone=timezone,
+            disabled_skills=disabled_skills,
+            memory=self.memory,
+        )
         # One file-read/write tracker per logical session. The tool registry is
         # shared by this loop, so tools resolve the active state via contextvars.
         self._file_state_store = FileStateStore(max_sessions=SESSION_CACHE_MAX_SIZE)
@@ -378,15 +409,10 @@ class AgentLoop:
         self.tools = tool_registry if tool_registry is not None else ToolRegistry()
         self._exec_session_manager = ExecSessionManager()
         self.runner = AgentRunner()
-        self.consolidator = Consolidator(
-            store=self.context.memory,
-            sessions=self.sessions,
-            build_messages=self.context.build_messages,
-            get_tool_definitions=self.tools.get_definitions,
-            resolve_prompt_context=PersistedPromptContextResolver(
-                workspace_scopes=self.workspace_scopes,
-                unified_session=unified_session,
-            ),
+        # Channel and project of a session when no inbound message is at hand.
+        self._prompt_context = PersistedPromptContextResolver(
+            workspace_scopes=self.workspace_scopes,
+            unified_session=unified_session,
         )
         self.subagents = SubagentManager(
             workspace=workspace,
@@ -397,7 +423,7 @@ class AgentLoop:
             disabled_skills=disabled_skills,
             max_iterations=self.max_iterations,
             max_concurrent_subagents=max_concurrent_subagents,
-            consolidator=self.consolidator,
+            memory=self.memory,
         )
         self._unified_session = unified_session
         self._running = False
@@ -432,14 +458,6 @@ class AgentLoop:
         self._concurrency_gate: asyncio.Semaphore | None = (
             asyncio.Semaphore(_max) if _max > 0 else None
         )
-        self.auto_compact = AutoCompact(
-            sessions=self.sessions,
-            consolidator=self.consolidator,
-            session_ttl_minutes=session_ttl_minutes,
-            bind_events=self._idle_events,
-        )
-        self._idle_compact_check_interval_s = idle_compact_check_interval_seconds
-        self._next_idle_compact_check_at = time.monotonic()
         if model_preset:
             self.set_model_preset(model_preset, publish_update=False)
         self._register_default_tools(provider_snapshot_loader=provider_snapshot_loader)
@@ -500,12 +518,10 @@ class AgentLoop:
             timezone=defaults.timezone,
             unified_session=defaults.unified_session,
             disabled_skills=defaults.disabled_skills,
-            session_ttl_minutes=defaults.session_ttl_minutes,
-            idle_compact_check_interval_seconds=defaults.idle_compact_check_interval_seconds,
             tools_config=config.tools,
             model_presets=preset_helpers.configured_model_presets(config),
             model_preset=defaults.model_preset,
-            dream_model_preset=defaults.dream.model_override,
+            memory_config=defaults.memory,
             restart_mode=config.gateway.restart_mode,
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
@@ -709,7 +725,7 @@ class AgentLoop:
             history=ctx.history,
             current_message=ctx.msg.content,
             media=ctx.msg.media if ctx.kind is TurnKind.USER and ctx.msg.media else None,
-            session_summary=ctx.pending_summary,
+            memory_key=ctx.session_key,
             runtime_context_blocks=ctx.runtime_context_blocks,
         )
 
@@ -922,16 +938,6 @@ class AgentLoop:
             return False
         return msg.channel == "system" or not self.commands.is_dispatchable_command(
             msg.content.strip()
-        )
-
-    def _idle_events(
-        self,
-        session_key: str,
-    ) -> EventSink:
-        """Bind one idle compaction to its current user-facing destination."""
-        session = self.sessions.get_or_create(session_key)
-        return self.turn_delivery_factory.session_events(
-            session_key, session.metadata,
         )
 
     def _remember_session_route(
@@ -1159,11 +1165,13 @@ class AgentLoop:
             message_metadata=request_metadata,
             session_metadata=session.metadata if session is not None else None,
         )
+        # Private sessions never see, or show the Observer, the workspace's memory.
+        durable_memory = session.policy.persist if session is not None else True
         transcript_builder = partial(
             self.context.build_transcript,
             channel=request_ctx.channel,
             workspace=effective_scope.project_path,
-            include_memory=session.policy.persist if session is not None else True,
+            durable_memory=durable_memory,
         )
         if request_context is None:
             request_ctx = dataclasses.replace(
@@ -1194,6 +1202,13 @@ class AgentLoop:
                 "or call update_goal with action='complete' if the work is truly finished."
             )
 
+        memory_compactor = self.memory.compactor(
+            session,
+            session_key=consolidation_session_key,
+            history_length=len(transcript_input.history),
+            persist=session is not None and not ephemeral,
+            durable=durable_memory,
+        )
         session_metadata = session.metadata if session is not None else None
         try:
             for scope in turn_scopes or ():
@@ -1233,19 +1248,9 @@ class AgentLoop:
                 session_key=session.key if session else None,
                 provider_retry_mode=self.provider_retry_mode,
                 checkpoint_callback=_checkpoint,
-                consolidate_history=partial(
-                    self.consolidator.summarize_transcript,
-                    runtime=runtime,
-                    session_key=consolidation_session_key,
-                    tools=effective_tools.get_definitions(),
-                    persist=session is not None and not ephemeral,
-                ),
+                consolidate_history=memory_compactor,
                 consolidate_provider_compaction=partial(
-                    self.consolidator.summarize_provider_compaction,
-                    runtime=runtime,
-                    session_key=consolidation_session_key,
-                    tools=effective_tools.get_definitions(),
-                    persist=session is not None and not ephemeral,
+                    self.memory.provider_compactor_adapter, memory_compactor,
                 ),
                 injection_callback=_drain_pending,
                 terminal_injection_callback=_wait_for_pending,
@@ -1268,6 +1273,10 @@ class AgentLoop:
             reset_workspace_scope(workspace_token)
             reset_request_context(request_token)
             reset_file_states(file_state_token)
+            if ephemeral and (session is None or session.policy.persist):
+                # A one-off run's transient observations must not reach the next
+                # turn; private sessions keep theirs for as long as they live.
+                self.memory.forget_session(consolidation_session_key)
         if session is not None and not ephemeral:
             session.provider_state = result.provider_state
         if result.stop_reason == "max_iterations":
@@ -1295,18 +1304,6 @@ class AgentLoop:
             )
         return result
 
-    def _check_expired_sessions_if_due(self) -> None:
-        """Scan idle sessions no more often than the configured interval."""
-        now = time.monotonic()
-        if now < self._next_idle_compact_check_at:
-            return
-        self._next_idle_compact_check_at = now + self._idle_compact_check_interval_s
-        self.auto_compact.check_expired(
-            self.schedule_background,
-            self.runtime_for_session,
-            active_session_keys=self._pending_queues.keys(),
-        )
-
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
@@ -1317,7 +1314,6 @@ class AgentLoop:
                 try:
                     msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
                 except asyncio.TimeoutError:
-                    self._check_expired_sessions_if_due()
                     continue
                 except asyncio.CancelledError:
                     # Preserve real task cancellation so shutdown can complete cleanly.
@@ -1790,7 +1786,7 @@ class AgentLoop:
 
         with logger.contextualize(turn_id=ctx.turn_id, session_key=ctx.session_key):
             await self._run_turn_stage(ctx, "restore", self._restore_turn)
-            await self._run_turn_stage(ctx, "compact", self._compact_session)
+            await self._run_turn_stage(ctx, "memory", self._restore_memory)
             if await self._run_turn_stage(ctx, "command", self._dispatch_command):
                 self._log_turn_completion(ctx, outcome="command")
                 return ctx.outbound
@@ -1964,13 +1960,11 @@ class AgentLoop:
         ):
             self.sessions.save(session)
 
-    async def _compact_session(self, ctx: TurnContext) -> None:
+    async def _restore_memory(self, ctx: TurnContext) -> None:
+        """Drop messages observed since this session last ran from its replay."""
         session = ctx.require_session()
-        ctx.session, pending = self.auto_compact.prepare_session(
-            session,
-            ctx.session_key,
-        )
-        ctx.pending_summary = pending
+        if not ctx.ephemeral and self.memory.restore(session):
+            self.sessions.save(session)
 
     async def _dispatch_command(self, ctx: TurnContext) -> bool:
         if ctx.kind is TurnKind.SYSTEM or ctx.msg.channel == "system":
@@ -2030,23 +2024,14 @@ class AgentLoop:
         if runtime is None:
             runtime = self.runtime_for_session(session)
             ctx.runtime = runtime
-        if ctx.session_key.startswith("dream:"):
-            logger.info(
-                "Dream run using model={} (preset={})",
-                runtime.model,
-                runtime.model_preset or "default",
-            )
         if ctx.on_runtime_admitted is not None:
             await ctx.on_runtime_admitted(runtime)
-        if not ctx.ephemeral:
-            ctx.session, ctx.pending_summary = self.auto_compact.prepare_session(
-                session,
-                ctx.session_key,
-            )
-            session = ctx.require_session()
         is_subagent = ctx.kind is TurnKind.SYSTEM and ctx.msg.sender_id == "subagent"
 
-        ctx.history = session.get_history(extend_to_user=is_subagent)
+        ctx.history = [
+            *self.memory.history_prefix(ctx.session_key, durable=session.policy.persist),
+            *session.get_history(extend_to_user=is_subagent),
+        ]
         stored_state = session.provider_state
         subagent_followup_persisted = False
         if is_subagent:
@@ -2199,7 +2184,11 @@ class AgentLoop:
         self._save_turn(
             session, ctx.all_messages, ctx.save_skip,
             turn_latency_ms=ctx.turn_latency_ms,
-            summary_checkpoint=None if ctx.ephemeral else ctx.summary_checkpoint,
+            # One-off runs leave the stored session untouched; private sessions
+            # live only in memory and advance past what their overlay observed.
+            summary_checkpoint=(
+                None if ctx.ephemeral and session.policy.persist else ctx.summary_checkpoint
+            ),
             input_persisted_early=ctx.input_persisted_early,
         )
         if (
@@ -2214,6 +2203,9 @@ class AgentLoop:
         self._clear_pending_user_turn(session)
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
+        if not ctx.ephemeral and session.policy.persist:
+            # Observation runs after the reply, never in front of it.
+            self.schedule_background(self.memory.after_turn(ctx.session_key))
         if not ctx.ephemeral:
             await self.runtime_event_publisher.session_turn_persisted(
                 ctx.msg,
@@ -2336,16 +2328,13 @@ class AgentLoop:
         # the first message after the replacement checkpoint.
         if summary_checkpoint is not None and checkpoint_boundary == skip - 1:
             insert_at = len(session.messages) - (1 if input_persisted_early else 0)
-            session.commit_summary_checkpoint(
-                summary_checkpoint.summary,
-                insert_at=insert_at,
-            )
+            session.commit_summary_checkpoint(insert_at=insert_at)
 
         for message_index, message in enumerate(messages[skip:], start=skip):
             # Insert against the raw transcript index before filtering the
             # message so persistence cleanup cannot shift the H/Δ boundary.
             if summary_checkpoint is not None and checkpoint_boundary == message_index:
-                session.commit_summary_checkpoint(summary_checkpoint.summary)
+                session.commit_summary_checkpoint()
 
             entry = dict(message)
             followup_id_value = cast(object, entry.pop(PENDING_FOLLOWUP_ID_KEY, None))
@@ -2425,7 +2414,7 @@ class AgentLoop:
                     if tc.get("id")
                 )
         if summary_checkpoint is not None and checkpoint_boundary == len(messages):
-            session.commit_summary_checkpoint(summary_checkpoint.summary)
+            session.commit_summary_checkpoint()
         if turn_latency_ms is not None and last_assistant_idx is not None:
             session.messages[last_assistant_idx]["latency_ms"] = int(turn_latency_ms)
         if saved_followup_ids:

@@ -89,7 +89,7 @@ async def test_dedup_uses_compacted_request_instead_of_raw_transcript(tmp_path, 
     consolidate = AsyncMock(return_value="The file was inspected; its original text was omitted.")
 
     def build(transcript):
-        system = transcript.session_summary["text"] if transcript.session_summary else "system"
+        system = "system"
         messages = [{"role": "system", "content": system}, *transcript.history]
         if transcript.current_message is not None:
             messages.append({"role": "user", "content": transcript.current_message})

@@ -138,7 +138,8 @@
       "fields": {
         "agents_defaults_timezone_mode": {"label": "시스템 시간대 사용", "help": "끄면 시간대를 직접 선택할 수 있습니다."},
         "agents_defaults_timezone": {"label": "시간대", "help": "시간대를 선택하세요. UTC 시차는 현재 날짜를 기준으로 표시됩니다."},
-        "agents_defaults_dream_enabled": {"label": "기억 정리", "help": "대화의 유용한 정보를 자동으로 정리합니다. 꺼도 기존 기억은 계속 사용합니다."},
+        "agents_defaults_memory_message_tokens": {"label": "관찰 임계값(토큰)", "help": "관찰되지 않은 대화가 이 토큰 수에 도달하면 관찰합니다. 기본값 30,000."},
+        "agents_defaults_memory_observation_tokens": {"label": "메모리 압축 임계값(토큰)", "help": "관찰 로그가 이 크기를 넘으면 반성으로 압축합니다. 기본값 40,000."},
         "gateway_heartbeat_enabled": {"label": "주기적 확인", "help": "HEARTBEAT.md의 작업을 주기적으로 확인합니다."},
         "gateway_heartbeat_interval_s": {"label": "확인 간격(초)", "help": "게이트웨이가 시작될 때 기본 주기적 확인을 예약합니다."},
         "agents_defaults_max_tool_iterations": {"label": "턴당 도구 반복 한도", "help": "한 턴에서 모델과 도구가 상호작용하는 최대 횟수입니다."},
@@ -181,7 +182,7 @@
       "groups": {
         "chat": {"title": "WebUI 채팅 권한", "help": "로컬 서비스 접근 및 기본 채팅 권한입니다."},
         "identity": {"title": "시간대", "help": "예약 작업의 시간대를 선택하세요."},
-        "memory": {"title": "기억", "help": "자동 기억 정리를 켜거나 끕니다."},
+        "memory": {"title": "기억", "help": "관찰 메모리는 긴 대화를 날짜가 있는 관찰로 정리해 모든 채팅에서 공유합니다."},
         "heartbeat": {"title": "주기적 확인 일정", "help": "기본 주기적 작업 확인을 설정합니다."},
         "execution": {"title": "에이전트 실행 제한", "help": "도구 실행 및 재시도 방식입니다."},
         "sessions": {"title": "대화", "help": "플랫폼 간에 대화를 공유합니다."},
@@ -504,7 +505,7 @@
         "user": "채팅",
         "api": "API",
         "cron": "자동화",
-        "dream": "기억 정리",
+        "memory": "기억 정리",
         "system": "보조 호출"
       }
     },
@@ -1528,21 +1529,17 @@
             "title": "대화 기록 보기",
             "description": "저장된 최근 N개의 대화 메시지를 출력합니다."
           },
-          "dream": {
-            "title": "Dream 실행",
-            "description": "메모리 정리를 수동으로 트리거합니다."
+          "memory": {
+            "title": "메모리",
+            "description": "nanobot이 기억하는 내용을 표시합니다. `/memory reflect`로 지금 메모리를 압축합니다."
           },
-          "dream_log": {
-            "title": "Dream 로그 보기",
-            "description": "마지막 Dream 정리에서 변경된 내용을 표시합니다."
+          "memory_log": {
+            "title": "메모리 로그",
+            "description": "최근 메모리 변경 내용을 표시합니다."
           },
-          "dream_restore": {
+          "memory_restore": {
             "title": "메모리 복원",
-            "description": "이전 Dream 스냅샷으로 메모리를 되돌립니다."
-          },
-          "dream_prompt": {
-            "title": "Dream 메모리",
-            "description": "Dream이 이 워크스페이스의 메모리를 정리하는 방식을 설정합니다."
+            "description": "메모리를 이전 버전으로 되돌립니다."
           },
           "goal": {
             "title": "장기 목표",

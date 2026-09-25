@@ -43,6 +43,7 @@ def _make_loop(tmp_path: Path, unified_session: bool = False) -> AgentLoop:
     provider.get_default_model.return_value = "test-model"
 
     with patch("nanobot.agent.loop.SessionManager"), \
+         patch("nanobot.agent.loop.Memory", autospec=True), \
          patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
         mock_sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
         loop = AgentLoop(
@@ -258,7 +259,7 @@ class TestCmdNewUnifiedSession:
         previous_file_state.record_read(tracked_file)
         loop = SimpleNamespace(
             sessions=sessions,
-            consolidator=SimpleNamespace(archive_session=AsyncMock(return_value=True)),
+            memory=SimpleNamespace(archive=AsyncMock(return_value=None), forget_session=MagicMock()),
             _cancel_active_tasks=AsyncMock(return_value=0),
             discard_session_file_state=file_state_store.discard,
             llm_runtime=MagicMock(return_value=MagicMock()),
@@ -288,15 +289,11 @@ class TestCmdNewUnifiedSession:
         reset_file_state = file_state_store.for_session("unified:default")
         assert reset_file_state is not previous_file_state
         assert reset_file_state.is_unchanged(tracked_file) is False
-        archived = loop.consolidator.archive_session.call_args.args[0]
+        loop.memory.archive.assert_called_once()
+        archived = loop.memory.archive.call_args.args[0]
         assert archived.key == "unified:default"
         assert archived.messages == expected_snapshot
         assert archived.last_archived == 0
-        loop.consolidator.archive_session.assert_called_once_with(
-            archived,
-            archive_end=len(expected_snapshot),
-            runtime=admitted_runtime,
-        )
         loop.llm_runtime.assert_not_called()
 
     @pytest.mark.asyncio
@@ -314,7 +311,7 @@ class TestCmdNewUnifiedSession:
 
         loop = SimpleNamespace(
             sessions=sessions,
-            consolidator=SimpleNamespace(archive_session=AsyncMock(return_value=True)),
+            memory=SimpleNamespace(archive=AsyncMock(return_value=None), forget_session=MagicMock()),
             _cancel_active_tasks=AsyncMock(return_value=0),
             discard_session_file_state=MagicMock(),
             runtime_for_session=MagicMock(return_value=MagicMock()),

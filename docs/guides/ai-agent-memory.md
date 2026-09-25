@@ -1,22 +1,22 @@
 # How AI Agent Memory Works in nanobot
 
-This guide explains how to use nanobot's long-term AI agent memory: session
-history, compressed archives, durable memory files, Dream consolidation, and
+This guide explains how to use nanobot's long-term AI agent memory:
+Observational Memory, the observation log it shares across conversations, and
 Git-backed memory changes.
 
 ## What you will build
 
-- a workspace with persistent session history
-- compressed history archives for older turns
-- durable memory files such as `USER.md` and `MEMORY.md`
-- a Dream workflow for curating long-term memory
+- a workspace whose conversations are remembered across sessions and channels
+- an observation log that condenses itself as it grows
+- durable profile files such as `SOUL.md` and `USER.md`
+- a versioned memory history you can inspect and restore
 
 ## When to use this
 
-Use memory when an agent should remember stable preferences, project facts,
-decisions, and recurring context across sessions. Do not use memory as a dumping
-ground for every raw transcript; nanobot separates short-term messages from
-curated durable knowledge.
+Memory is always on. It helps whenever an agent should remember preferences,
+project facts, decisions and ongoing work across conversations. nanobot keeps
+the full chat history in sessions and sends the model dated observations
+instead of an ever-growing transcript.
 
 ## Install
 
@@ -28,39 +28,51 @@ nanobot agent -m "Hello!"
 
 ## Minimal working example
 
-Ask the agent to remember a stable fact in a normal session, then run Dream:
+Talk to the agent as usual. Once a conversation grows long, nanobot observes it
+in the background. To observe the current conversation right away:
 
 ```text
-/dream
+/compact
 ```
 
-Inspect recent memory changes:
+See what nanobot remembers:
 
 ```text
-/dream-log
+/memory
 ```
 
-The exact files live in the active workspace, usually under
-`~/.nanobot/workspace/`.
+Inspect the latest memory change:
+
+```text
+/memory-log
+```
+
+The observation log lives in the active workspace, usually
+`~/.nanobot/workspace/memory/observations.md`.
 
 ## Production notes
 
-- Use one workspace per project or personal context.
-- Keep durable facts concise; old session details belong in `history.jsonl`.
-- Use `/dream-prompt init` when a workspace needs custom memory guidance.
+- Use one workspace per project or personal context; every conversation in a
+  workspace shares its memory.
+- Set `agents.defaults.memory.modelOverride` to a fast, inexpensive model
+  preset: observation and reflection run often.
+- Keep the default thresholds unless you have a reason; they are the
+  configuration behind Observational Memory's LongMemEval result.
 - Review Git-backed memory changes when memory affects important workflows.
 
 ## Security notes
 
 - Memory files may contain sensitive user or project facts.
 - Avoid sharing workspaces without reviewing `SOUL.md`, `USER.md`, and
-  `memory/MEMORY.md`.
+  `memory/observations.md`.
 - Use separate workspaces for personal and team contexts.
+- Temporary chats never write memory and never see it.
 
 ## Troubleshooting
 
-- If memory feels stale, run `/dream` and inspect `/dream-log`.
-- If memory changed incorrectly, use `/dream-restore` to inspect and restore
+- If memory seems to miss something recent, it may not be observed yet: run
+  `/compact` in that conversation, then `/memory`.
+- If memory changed incorrectly, use `/memory-restore` to inspect and restore
   previous versions.
 - If a new session lacks context, confirm it uses the same workspace.
 
@@ -68,5 +80,5 @@ The exact files live in the active workspace, usually under
 
 - [AI Agent Memory in nanobot](../memory.md)
 - [Concepts](../concepts.md)
-- [Configuration](../configuration.md#auto-compact)
+- [Configuration](../configuration.md#memory)
 - [Chat Commands](../chat-commands.md)

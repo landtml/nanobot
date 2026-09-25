@@ -97,7 +97,7 @@ def test_usage_payload_aggregates_cache_coverage_sources_and_failures(tmp_path: 
                 "2026-06-03T02:00:00+00:00",
                 provider="anthropic",
                 model="claude-sonnet-4",
-                source="dream",
+                source="memory",
                 usage=LLMUsage.estimated(input_tokens=30, output_tokens=10),
             ),
             _call(
@@ -135,10 +135,40 @@ def test_usage_payload_aggregates_cache_coverage_sources_and_failures(tmp_path: 
     assert day["estimated_requests"] == 1
     assert day["sources"]["api"]["cache_read_observed_input_tokens"] == 0
     assert day["sources"]["user"]["cache_read_observed_input_tokens"] == 100
+    assert day["sources"]["memory"]["total_tokens"] == 40
     assert {(row["provider"], row["model"]) for row in payload["providers_30d"]} == {
         ("openai", "gpt-5"),
         ("anthropic", "claude-sonnet-4"),
     }
+
+
+def test_usage_payload_counts_legacy_dream_rows_as_memory(tmp_path: Path) -> None:
+    path = tmp_path / "llm_usage.sqlite3"
+    store = LLMUsageStore(path)
+    store.record_many([
+        _call(
+            "2026-06-03T01:00:00+00:00",
+            source="memory",
+            usage=LLMUsage.reported(input_tokens=10, output_tokens=2),
+        ),
+        _call(
+            "2026-06-03T02:00:00+00:00",
+            usage=LLMUsage.reported(input_tokens=20, output_tokens=3),
+        ),
+    ])
+    # Rows written before Observational Memory replaced Dream keep their source.
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE llm_calls SET source = 'dream' WHERE input_tokens = 20",
+        )
+    store = LLMUsageStore(path)
+
+    payload = store.usage_payload(now=datetime(2026, 6, 3, 12, tzinfo=timezone.utc))
+
+    sources = payload["days"][0]["sources"]
+    assert "dream" not in sources
+    assert sources["memory"]["requests"] == 2
+    assert sources["memory"]["total_tokens"] == 35
 
 
 def test_usage_payload_preserves_zero_cache_observation(tmp_path: Path) -> None:

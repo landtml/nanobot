@@ -144,9 +144,13 @@
           "label": "时区",
           "help": "选择时区。UTC 偏移按当前日期显示。"
         },
-        "agents_defaults_dream_enabled": {
-          "label": "记忆整理",
-          "help": "自动整理对话中的有用信息。关闭后停止整理，已有记忆仍可使用。"
+        "agents_defaults_memory_message_tokens": {
+          "label": "观察阈值（tokens）",
+          "help": "未观察的对话达到此 token 数时进行观察。默认 30,000。"
+        },
+        "agents_defaults_memory_observation_tokens": {
+          "label": "记忆压缩阈值（tokens）",
+          "help": "观察日志超过此大小时进行反思压缩。默认 40,000。"
         },
         "gateway_heartbeat_enabled": {
           "label": "心跳任务",
@@ -312,7 +316,7 @@
         },
         "memory": {
           "title": "记忆",
-          "help": "开启或关闭自动记忆整理。"
+          "help": "观察式记忆会把长对话整理成带日期的观察，在所有聊天间共享。"
         },
         "heartbeat": {
           "title": "心跳计划",
@@ -917,7 +921,7 @@
         "user": "对话",
         "api": "API",
         "cron": "自动任务",
-        "dream": "记忆整理",
+        "memory": "记忆整理",
         "system": "辅助调用"
       },
       "systemHelp": "辅助调用包括聊天标题生成等内部任务，以及未标注来源的调用。"
@@ -1737,21 +1741,17 @@
             "title": "查看对话历史",
             "description": "打印最近 N 条已持久化的对话消息。"
           },
-          "dream": {
-            "title": "运行 Dream",
-            "description": "手动触发记忆整理。"
+          "memory": {
+            "title": "记忆",
+            "description": "查看 nanobot 记住的内容；`/memory reflect` 立即压缩记忆。"
           },
-          "dream_log": {
-            "title": "查看 Dream 日志",
-            "description": "查看上一次 Dream 整理改变了什么。"
+          "memory_log": {
+            "title": "记忆日志",
+            "description": "查看最近一次记忆变更。"
           },
-          "dream_restore": {
+          "memory_restore": {
             "title": "恢复记忆",
-            "description": "将记忆恢复到之前的 Dream 快照。"
-          },
-          "dream_prompt": {
-            "title": "Dream 记忆",
-            "description": "设置 Dream 如何整理当前工作区的记忆。"
+            "description": "将记忆恢复到较早的版本。"
           },
           "goal": {
             "title": "长期目标",

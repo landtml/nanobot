@@ -144,9 +144,13 @@
           "label": "Timezone",
           "help": "Choose a timezone. UTC offsets reflect the current date."
         },
-        "agents_defaults_dream_enabled": {
-          "label": "Memory consolidation",
-          "help": "Automatically organize useful information from conversations. Turning this off keeps existing memories available."
+        "agents_defaults_memory_message_tokens": {
+          "label": "Observe after (tokens)",
+          "help": "Unobserved conversation tokens that trigger an observation. Default 30,000."
+        },
+        "agents_defaults_memory_observation_tokens": {
+          "label": "Condense memory above (tokens)",
+          "help": "Observation log size that triggers reflection. Default 40,000."
         },
         "gateway_heartbeat_enabled": {
           "label": "Heartbeat",
@@ -312,7 +316,7 @@
         },
         "memory": {
           "title": "Memory",
-          "help": "Enable or disable automatic memory consolidation."
+          "help": "Observational memory turns long conversations into dated observations shared across chats."
         },
         "heartbeat": {
           "title": "Heartbeat schedule",
@@ -917,7 +921,7 @@
         "user": "Chat",
         "api": "API",
         "cron": "Automations",
-        "dream": "Memory",
+        "memory": "Memory",
         "system": "Auxiliary calls"
       },
       "systemHelp": "Auxiliary calls include chat title generation, other internal tasks, and calls without a recorded source."
@@ -1738,21 +1742,17 @@
             "title": "Show conversation history",
             "description": "Print the last N persisted conversation messages."
           },
-          "dream": {
-            "title": "Run Dream",
-            "description": "Manually trigger memory consolidation."
+          "memory": {
+            "title": "Memory",
+            "description": "Show what nanobot remembers; `/memory reflect` condenses memory now."
           },
-          "dream_log": {
-            "title": "Show Dream log",
-            "description": "Show what the last Dream consolidation changed."
+          "memory_log": {
+            "title": "Memory log",
+            "description": "Show the latest change to memory."
           },
-          "dream_restore": {
+          "memory_restore": {
             "title": "Restore memory",
-            "description": "Revert memory to a previous Dream snapshot."
-          },
-          "dream_prompt": {
-            "title": "Dream memory",
-            "description": "Tell Dream how to organize this workspace's memory."
+            "description": "Revert memory to an earlier version."
           },
           "goal": {
             "title": "Long-running goal",
