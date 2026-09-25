@@ -58,7 +58,7 @@ phases:
 
   - id: P00
     title: Baseline, simulator, privacy fix
-    status: todo
+    status: blocked
     depends_on: []
     goal: Freeze today's behaviour in tests and build the simulator every later phase uses.
     create:
@@ -66,12 +66,17 @@ phases:
       - tests/orchestration/sim.py            # ScriptedProvider, VirtualClock, faults: crash, rate_limit, timeout, slow_tool
       - tests/orchestration/test_baseline_subagents.py
     touch:
-      - nanobot/agent/tools/filesystem.py     # I5: drop extra_read_allowed_files for non-durable sessions
+      - nanobot/agent/loop.py                 # capture active session policy at the tool boundary
+      - nanobot/agent/subagent.py             # carry privacy and logging policy into child runs
+      - nanobot/agent/tools/context.py        # expose session persistence in request context
+      - nanobot/agent/tools/filesystem.py     # deny private reads of observations.md
+      - nanobot/agent/tools/search.py         # keep private grep from returning observations.md
     approach:
       - Reuse tests/agent/runner_helpers.py and session_helpers.py; do not duplicate fakes.
       - Characterize: spawn background and wait=true, result injection mid-turn vs idle parent, /stop cancels children, dedup by subagent_task_id, usage source attribution, session message rate limit and reply timeout.
       - Record baseline metrics in the test output (parent model calls per N children, cancel latency) for later comparison.
       - "Privacy fix: read the active session's policy (SessionPolicy.persist) at call time via request context; keep the allowance for durable sessions."
+      - "I5 shell boundary remains open: private runs still expose arbitrary exec/exec_session access to observations.md. Decide process isolation or disablement before closing I5; tracked in issue #1."
     done_when:
       - Baseline tests pass on the unchanged code.
       - Simulator can run a parent turn with 3 children in < 1 s wall time.

@@ -145,6 +145,7 @@ async def test_direct_transient_run_never_spills_before_cancellation(tmp_path) -
         request = current_request_context()
         assert request is not None and request.workspace == tmp_path
         assert request.log_content is False
+        assert request.session_persist is False
         if count == 1:
             return LLMResponse(content="", tool_calls=[
                 ToolCallRequest(id="cancel-result", name="web_search", arguments={}),
@@ -168,6 +169,32 @@ async def test_direct_transient_run_never_spills_before_cancellation(tmp_path) -
     await loop.discard_session(session.key)
     assert not (tmp_path / ".nanobot" / "tool-results").exists()
     assert current_request_context() is None
+
+
+@pytest.mark.asyncio
+async def test_request_context_keeps_durable_quiet_session_distinct_from_private(
+    tmp_path,
+) -> None:
+    loop = _loop(tmp_path, [])
+    session = loop.sessions.get_or_create("websocket:quiet-durable")
+    session.policy = SessionPolicy(persist=True, log_content=False)
+    observed: tuple[bool, bool] | None = None
+
+    async def respond(**_kwargs):
+        nonlocal observed
+        request = current_request_context()
+        assert request is not None
+        observed = (request.session_persist, request.log_content)
+        return LLMResponse(content="done")
+
+    loop.provider.chat_stream_with_retry = AsyncMock(side_effect=respond)
+    await loop._run_agent_loop(
+        TranscriptInput(history=[], current_message="quiet session"),
+        runtime=loop.llm_runtime(),
+        session=session,
+    )
+
+    assert observed == (True, False)
 
 
 @pytest.mark.parametrize("private", [True, False])

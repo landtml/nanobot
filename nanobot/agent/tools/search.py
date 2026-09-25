@@ -221,9 +221,11 @@ class _SearchTool(_FsTool):
         return target.relative_to(root).as_posix()
 
     def _iter_files(self, root: Path, budget: _SearchBudget) -> Iterable[Path]:
+        protected_path = self._private_observations_path()
         if root.is_file():
             budget.visit_path()
-            yield root
+            if protected_path is None or not self._resolves_to(root, protected_path):
+                yield root
             return
 
         for dirpath, dirnames, filenames in os.walk(root):
@@ -234,7 +236,9 @@ class _SearchTool(_FsTool):
             current = Path(dirpath)
             for filename in sorted(filenames):
                 budget.visit_path()
-                yield current / filename
+                path = current / filename
+                if protected_path is None or not self._resolves_to(path, protected_path):
+                    yield path
 
 
 class FindFilesTool(_SearchTool):

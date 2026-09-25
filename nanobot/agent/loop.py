@@ -749,6 +749,7 @@ class AgentLoop:
             turn_id=ctx.turn_id,
             workspace=scope.project_path,
             log_content=ctx.session.policy.log_content and not ctx.ephemeral,
+            session_persist=ctx.session.policy.persist,
         )
 
     async def _resolve_runtime_context_for_turn(
@@ -832,6 +833,7 @@ class AgentLoop:
                 turn_id=metadata.get("webui_turn_id"),
                 workspace=scope.project_path,
                 log_content=session.policy.log_content,
+                session_persist=session.policy.persist,
             ))
             workspace_token = bind_workspace_scope(scope)
             turn_scope_stack = ExitStack()
@@ -1069,6 +1071,7 @@ class AgentLoop:
                         turn_id=request_ctx.turn_id,
                         workspace=scope.project_path,
                         log_content=request_ctx.log_content,
+                        session_persist=request_ctx.session_persist,
                     )
                     blocks = await self._resolve_runtime_context_for_request(
                         pending_request,
@@ -1156,6 +1159,7 @@ class AgentLoop:
             chat_id="direct",
             session_key=session.key if session is not None else None,
             runtime=runtime,
+            session_persist=session.policy.persist if session is not None else True,
         )
         active_session_key = session.key if session else request_ctx.session_key
         consolidation_session_key = active_session_key or "agent:transient"

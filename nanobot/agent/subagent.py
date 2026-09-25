@@ -22,7 +22,9 @@ from nanobot.agent.tools.context import (
     RequestContext,
     ToolContext,
     bind_request_context,
+    current_request_context,
     reset_request_context,
+    tool_log_content_allowed,
 )
 from nanobot.agent.tools.exec_session import ExecSessionManager
 from nanobot.agent.tools.file_state import FileStates
@@ -51,6 +53,8 @@ class _SubagentOrigin(TypedDict):
     chat_id: str
     session_key: str | None
     llm_usage_source: NotRequired[LLMUsageSource]
+    session_persist: NotRequired[bool]
+    log_content: NotRequired[bool]
 
 
 @dataclass(slots=True)
@@ -79,6 +83,8 @@ class _SubagentHook(AgentHook):
         self._status = status
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
+        if not tool_log_content_allowed():
+            return
         for tool_call in context.tool_calls:
             args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
             logger.debug(
@@ -250,6 +256,7 @@ class SubagentManager:
             runtime = self._compat_spawn_runtime()
         if temperature is not None:
             runtime = runtime.with_generation_overrides(temperature=temperature)
+        request_ctx = current_request_context()
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin: _SubagentOrigin = {
@@ -257,6 +264,8 @@ class SubagentManager:
             "chat_id": origin_chat_id,
             "session_key": session_key,
             "llm_usage_source": current_llm_usage_source(),
+            "session_persist": request_ctx.session_persist if request_ctx else True,
+            "log_content": request_ctx.log_content if request_ctx else True,
         }
 
         status = SubagentStatus(
@@ -293,7 +302,8 @@ class SubagentManager:
 
         bg_task.add_done_callback(_cleanup)
 
-        logger.info("Spawned subagent [{}]: {}", task_id, display_label)
+        if origin["log_content"]:
+            logger.info("Spawned subagent [{}]: {}", task_id, display_label)
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
 
     async def run_inline(
@@ -314,6 +324,7 @@ class SubagentManager:
             runtime = self._compat_spawn_runtime()
         if temperature is not None:
             runtime = runtime.with_generation_overrides(temperature=temperature)
+        request_ctx = current_request_context()
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin: _SubagentOrigin = {
@@ -321,6 +332,8 @@ class SubagentManager:
             "chat_id": origin_chat_id,
             "session_key": session_key,
             "llm_usage_source": current_llm_usage_source(),
+            "session_persist": request_ctx.session_persist if request_ctx else True,
+            "log_content": request_ctx.log_content if request_ctx else True,
         }
         status = SubagentStatus(
             task_id=task_id,
@@ -329,7 +342,8 @@ class SubagentManager:
             started_at=time.monotonic(),
         )
         self._task_statuses[task_id] = status
-        logger.info("Running inline subagent [{}]: {}", task_id, display_label)
+        if origin["log_content"]:
+            logger.info("Running inline subagent [{}]: {}", task_id, display_label)
         inline_task = asyncio.create_task(
             self._run_subagent(
                 task_id,
@@ -402,7 +416,8 @@ class SubagentManager:
         announce: bool = True,
     ) -> str:
         """Execute the subagent task and announce the result."""
-        logger.info("Subagent [{}] starting task: {}", task_id, label)
+        if origin.get("log_content", True):
+            logger.info("Subagent [{}] starting task: {}", task_id, label)
 
         async def _on_checkpoint(payload: dict[str, Any]) -> None:
             status.phase = payload.get("phase", status.phase)
@@ -429,6 +444,8 @@ class SubagentManager:
                 message_id=origin_message_id,
                 session_key=sess_key,
                 runtime=runtime,
+                log_content=origin.get("log_content", True),
+                session_persist=origin.get("session_persist", True),
             ))
             token = bind_workspace_scope(workspace_scope) if workspace_scope is not None else None
             memory_key = f"subagent:{task_id}"
@@ -497,7 +514,10 @@ class SubagentManager:
         except Exception as e:
             status.phase = "error"
             status.error = str(e)
-            logger.exception("Subagent [{}] failed", task_id)
+            if origin.get("log_content", True):
+                logger.exception("Subagent [{}] failed", task_id)
+            else:
+                logger.error("Subagent [{}] failed [content hidden]", task_id)
             final_result = f"Error: {e}"
             if announce:
                 await self._announce_result(

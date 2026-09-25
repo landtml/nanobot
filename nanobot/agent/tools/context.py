@@ -41,6 +41,7 @@ class RequestContext:
     workspace: Path | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
     log_content: bool = True
+    session_persist: bool = True
 
 
 @runtime_checkable
