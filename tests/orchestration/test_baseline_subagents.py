@@ -255,6 +255,52 @@ async def test_stop_cancels_an_active_process_direct_turn(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_stop_cancels_registered_descendants_before_parent_tasks(tmp_path: Path) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider({}, route=_route_request),
+        workspace=tmp_path,
+        model="test-model",
+        tools_config=_resolved_tools_config(),
+    )
+    session_key = "cli:cancel-order"
+    root = await loop.run_registry.ensure_session_root(session_key)
+    parent = loop.run_registry.register(
+        "parent-turn", parent_id=root.id, root_id=root.id,
+    )
+    await loop.run_registry.start(parent.id)
+    child = loop.run_registry.register(
+        "child-run", parent_id=parent.id, root_id=root.id,
+    )
+    await loop.run_registry.start(child.id)
+    started = asyncio.Event()
+    cancellation_order: list[str] = []
+
+    async def block(name: str) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_order.append(name)
+            raise
+
+    parent_task = asyncio.create_task(block("parent"))
+    child_task = asyncio.create_task(block("child"))
+    loop.run_registry.attach_task(parent.id, parent_task)
+    loop.run_registry.attach_task(child.id, child_task)
+    loop._track_active_task(session_key, parent_task)
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    try:
+        await loop._cancel_active_tasks(session_key)
+    finally:
+        await loop.aclose()
+
+    assert cancellation_order == ["child", "parent"]
+
+
+@pytest.mark.asyncio
 async def test_failed_session_dispatch_emits_failed_turn_state(tmp_path: Path) -> None:
     loop = AgentLoop(
         bus=MessageBus(),

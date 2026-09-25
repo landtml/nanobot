@@ -933,14 +933,14 @@ class AgentLoop:
         pending = self._pending_queues.get(key)
         tasks = tuple(self._active_tasks.pop(key, set()))
         current_task = asyncio.current_task()
-        cancelled = sum(
-            1 for task in tasks
-            if task is not current_task and not task.done() and task.cancel()
-        )
         tree_cancelled = (
             await self.run_registry.cancel_session(root_id)
             if root_id is not None
             else 0
+        )
+        cancelled = sum(
+            1 for task in tasks
+            if task is not current_task and not task.done() and task.cancel()
         )
         for t in tasks:
             if t is current_task:
