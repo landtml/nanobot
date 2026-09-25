@@ -35,7 +35,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import AgentDefaults, ToolsConfig
 from nanobot.llm_usage.context import LLMUsageSource, current_llm_usage_source
 from nanobot.orchestration.executor import RunExecutor
-from nanobot.orchestration.types import Budget, Capabilities, RunSpec
+from nanobot.orchestration.types import Budget, Capabilities, RunMessage, RunSpec
 from nanobot.providers.base import LLMProvider, LLMUsage
 from nanobot.security.workspace_access import (
     WorkspaceScope,
@@ -74,6 +74,7 @@ class SubagentStatus:
     usage: LLMUsage | None = None
     stop_reason: str | None = None
     error: str | None = None
+    mailbox: asyncio.Queue[RunMessage] = field(default_factory=asyncio.Queue, repr=False)
 
 
 class _SubagentHook(AgentHook):
@@ -471,6 +472,7 @@ class SubagentManager:
                     runtime=runtime,
                     budget=Budget(iterations=self.max_iterations),
                     max_tool_result_chars=self.max_tool_result_chars,
+                    concurrent_tools=True,
                     hook=_SubagentHook(task_id, status),
                     max_iterations_message="Task completed but no final response was generated.",
                     finalize_on_max_iterations=False,
@@ -484,6 +486,7 @@ class SubagentManager:
                     ),
                     consolidate_history=consolidate_history,
                     consolidate_provider_compaction=consolidate_provider_compaction,
+                    mailbox=status.mailbox,
                     profile="general",
                     task=task,
                     caps=Capabilities(tools=frozenset(tools.tool_names)),
