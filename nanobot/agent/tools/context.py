@@ -42,6 +42,7 @@ class RequestContext:
     attributes: dict[str, Any] = field(default_factory=dict)
     log_content: bool = True
     session_persist: bool = True
+    exec_session_owner_key: str | None = None
 
 
 @runtime_checkable
@@ -81,6 +82,13 @@ def tool_log_content_allowed() -> bool:
 def current_request_session_key() -> str | None:
     ctx = current_request_context()
     return ctx.session_key if ctx else None
+
+
+def current_exec_session_owner() -> str | None:
+    ctx = current_request_context()
+    if ctx is None:
+        return None
+    return ctx.exec_session_owner_key or ctx.session_key
 
 
 @dataclass

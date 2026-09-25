@@ -119,7 +119,7 @@ phases:
 
   - id: P02
     title: Run registry, tree, structured concurrency
-    status: todo
+    status: in_review
     depends_on: [P01]
     goal: Runs have ids, parents, roots, states; cancellation cascades (I2); status is public.
     create:

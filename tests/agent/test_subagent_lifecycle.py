@@ -1,6 +1,7 @@
 """Tests for SubagentManager lifecycle — spawn, run, announce, cancel."""
 
 import asyncio
+import os
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,7 +15,12 @@ from nanobot.agent.subagent import (
     SubagentStatus,
     _SubagentHook,
 )
-from nanobot.agent.tools.context import RequestContext, current_request_context, request_context
+from nanobot.agent.tools.context import (
+    RequestContext,
+    current_exec_session_owner,
+    current_request_context,
+    request_context,
+)
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import GenerationSettings, LLMProvider, LLMUsage
 from nanobot.utils.llm_runtime import LLMRuntime
@@ -379,6 +385,7 @@ class TestRunSubagent:
             )
             assert status.phase == "error"
             assert "LLM down" in status.error
+            assert sm.supervisor.get("t1").state == "failed"
             assert mock_announce.call_args.args[-2] == "error"
 
     @pytest.mark.asyncio
@@ -395,6 +402,35 @@ class TestRunSubagent:
             )
             assert status.phase == "done"
             assert status.stop_reason == "completed"
+
+    @pytest.mark.asyncio
+    async def test_inline_completion_terminates_owned_exec_session(self, tmp_path):
+        if os.name == "nt":
+            pytest.skip("managed exec process fixture uses the POSIX sleep command")
+        sm = _manager(tmp_path)
+
+        async def run_with_live_process(_spec):
+            owner_key = current_exec_session_owner()
+            assert owner_key is not None
+            await sm._exec_session_manager.start(
+                command="sleep 30",
+                cwd=str(tmp_path),
+                env={},
+                timeout=None,
+                shell_program=None,
+                login=False,
+                yield_time_ms=0,
+                max_output_chars=100,
+                owner_session_key=owner_key,
+            )
+            return AgentRunResult(final_content="done", messages=[], stop_reason="completed")
+
+        sm.runner.run = run_with_live_process
+
+        result = await sm.run_inline("task", runtime=_runtime(), session_key="session-1")
+
+        assert result == "done"
+        assert sm._exec_session_manager._sessions == {}
 
 
 # ---------------------------------------------------------------------------

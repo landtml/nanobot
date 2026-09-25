@@ -8,6 +8,7 @@ This module adds a deterministic three-child turn and /stop latency baseline.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
@@ -21,7 +22,7 @@ from nanobot.agent.context import TranscriptInput
 from nanobot.agent.loop import AgentLoop
 from nanobot.agent.runner import AgentRunResult, AgentRunSpec
 from nanobot.agent.tools.context import current_request_context
-from nanobot.bus.events import InboundMessage
+from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.command.router import CommandContext
 from nanobot.config.schema import Config, ToolsConfig
@@ -143,12 +144,27 @@ async def test_stop_cancels_a_child_and_records_latency(
 
     loop.subagents.runner.run = blocked_run
     try:
+        if os.name == "nt":
+            pytest.skip("managed exec process fixture uses the POSIX sleep command")
         await loop.subagents.spawn(
             "blocked child",
             runtime=runtime,
             session_key="cli:direct",
         )
+        generation_id = loop.run_registry.session_root_id("cli:direct")
+        assert generation_id is not None
         await asyncio.wait_for(child_started.wait(), timeout=1.0)
+        await loop.subagents._exec_session_manager.start(
+            command="sleep 30",
+            cwd=str(tmp_path),
+            env={},
+            timeout=None,
+            shell_program=None,
+            login=False,
+            yield_time_ms=0,
+            max_output_chars=100,
+            owner_session_key="cli:direct",
+        )
         started = perf_counter()
         message = InboundMessage(
             channel="cli",
@@ -171,8 +187,265 @@ async def test_stop_cancels_a_child_and_records_latency(
     record_property("p00_stop_cancel_latency_seconds", elapsed)
     assert stopped is not None and "stopped 1 task" in stopped.content.lower()
     assert child_cancelled.is_set()
+    assert loop.run_registry.live_tasks() == ()
+    assert loop.subagents._exec_session_manager._sessions == {}
+    assert loop.run_registry.session_root_id("cli:direct") is None
+    next_generation = await loop.run_registry.ensure_session_root("cli:direct")
+    assert next_generation.id != generation_id
     assert elapsed < 1.0
     print(f"P00 baseline: /stop cancelled a child in {elapsed * 1000:.1f} ms")
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_an_active_process_direct_turn(tmp_path: Path) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider({}, route=_route_request),
+        workspace=tmp_path,
+        model="test-model",
+        tools_config=_resolved_tools_config(),
+    )
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    continued_after_cancel = False
+
+    async def blocked_process(*_args: object, **_kwargs: object) -> None:
+        nonlocal continued_after_cancel
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        continued_after_cancel = True
+
+    loop._process_message = blocked_process
+    session_key = "cli:direct-stop"
+    direct_task = asyncio.create_task(
+        loop.process_direct("blocked", session_key=session_key)
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        assert direct_task in loop._active_tasks[session_key]
+        message = InboundMessage(
+            channel="cli",
+            sender_id="user",
+            chat_id="direct-stop",
+            content="/stop",
+        )
+        context = CommandContext(
+            msg=message,
+            session=loop.sessions.get_or_create(session_key),
+            key=session_key,
+            raw="/stop",
+            loop=loop,
+        )
+
+        await loop.commands.dispatch_priority(context)
+        await asyncio.gather(direct_task, return_exceptions=True)
+    finally:
+        if not direct_task.done():
+            direct_task.cancel()
+            await asyncio.gather(direct_task, return_exceptions=True)
+        await loop.aclose()
+
+    assert cancelled.is_set()
+    assert not continued_after_cancel
+    assert loop.run_registry.live_tasks() == ()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_registered_descendants_before_parent_tasks(tmp_path: Path) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider({}, route=_route_request),
+        workspace=tmp_path,
+        model="test-model",
+        tools_config=_resolved_tools_config(),
+    )
+    session_key = "cli:cancel-order"
+    root = await loop.run_registry.ensure_session_root(session_key)
+    parent = loop.run_registry.register(
+        "parent-turn", parent_id=root.id, root_id=root.id,
+    )
+    await loop.run_registry.start(parent.id)
+    child = loop.run_registry.register(
+        "child-run", parent_id=parent.id, root_id=root.id,
+    )
+    await loop.run_registry.start(child.id)
+    started = asyncio.Event()
+    cancellation_order: list[str] = []
+
+    async def block(name: str) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_order.append(name)
+            raise
+
+    parent_task = asyncio.create_task(block("parent"))
+    child_task = asyncio.create_task(block("child"))
+    loop.run_registry.attach_task(parent.id, parent_task)
+    loop.run_registry.attach_task(child.id, child_task)
+    loop._track_active_task(session_key, parent_task)
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    try:
+        await loop._cancel_active_tasks(session_key)
+    finally:
+        await loop.aclose()
+
+    assert cancellation_order == ["child", "parent"]
+
+
+@pytest.mark.asyncio
+async def test_failed_session_dispatch_emits_failed_turn_state(tmp_path: Path) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider({}, route=_route_request),
+        workspace=tmp_path,
+        model="test-model",
+        tools_config=_resolved_tools_config(),
+    )
+
+    async def fail_process(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("simulated turn failure")
+
+    loop._process_message = fail_process
+    session_key = "cli:failed-turn"
+    try:
+        await run_session(
+            loop,
+            InboundMessage(
+                channel="cli",
+                sender_id="user",
+                chat_id="failed-turn",
+                content="fail this turn",
+            ),
+        )
+        root_id = loop.run_registry.session_root_id(session_key)
+        assert root_id is not None
+        turns = [
+            record
+            for record in loop.run_registry._runs.values()
+            if record.parent_id == root_id
+        ]
+    finally:
+        await loop.aclose()
+
+    assert len(turns) == 1
+    assert turns[0].state == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direct", [False, True], ids=["queued", "direct"])
+async def test_provider_error_response_marks_turn_failed(tmp_path: Path, direct: bool) -> None:
+    provider = ScriptedProvider(
+        {"parent": [LLMResponse(content="provider error", finish_reason="error")]},
+        route=_route_request,
+    )
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        model="test-model",
+        tools_config=_resolved_tools_config(),
+    )
+    try:
+        if direct:
+            await loop.process_direct("cause provider error", session_key="cli:failure")
+        else:
+            await run_session(
+                loop,
+                InboundMessage(
+                    channel="cli",
+                    sender_id="user",
+                    chat_id="failure",
+                    content="cause provider error",
+                ),
+            )
+        root_id = loop.run_registry.session_root_id("cli:failure")
+        assert root_id is not None
+        turns = [
+            record
+            for record in loop.run_registry._runs.values()
+            if record.parent_id == root_id
+        ]
+        assert len(turns) == 1
+        assert turns[0].state == "failed"
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_new_from_process_direct_does_not_cancel_its_caller(tmp_path: Path) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider({}, route=_route_request),
+        workspace=tmp_path,
+        model="test-model",
+        tools_config=_resolved_tools_config(),
+    )
+    try:
+        response = await asyncio.wait_for(
+            loop.process_direct("/new", session_key="cli:direct"),
+            timeout=2,
+        )
+        assert response is not None
+        assert "new session started" in response.content.lower()
+        await asyncio.sleep(0)
+        assert "cli:direct" not in loop._active_tasks
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stop_snapshots_old_direct_tasks_before_waiting_for_cancellation(
+    tmp_path: Path,
+) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider({}, route=_route_request),
+        workspace=tmp_path,
+        model="test-model",
+        tools_config=_resolved_tools_config(),
+    )
+    old_started = asyncio.Event()
+    old_cancelled = asyncio.Event()
+    release_old = asyncio.Event()
+
+    async def process(msg: InboundMessage, **_kwargs: Any) -> OutboundMessage:
+        if msg.content == "old":
+            old_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                old_cancelled.set()
+                await release_old.wait()
+                raise
+        return OutboundMessage(channel="cli", chat_id="direct", content=msg.content)
+
+    loop._process_message = process
+    old_task = asyncio.create_task(loop.process_direct("old", session_key="cli:direct"))
+    await asyncio.wait_for(old_started.wait(), timeout=1)
+    stop_task = asyncio.create_task(loop._cancel_active_tasks("cli:direct"))
+    await asyncio.wait_for(old_cancelled.wait(), timeout=1)
+    new_task = asyncio.create_task(loop.process_direct("new", session_key="cli:direct"))
+    try:
+        await asyncio.sleep(0)
+        release_old.set()
+        await asyncio.wait_for(stop_task, timeout=1)
+        response = await asyncio.wait_for(new_task, timeout=1)
+        assert response is not None and response.content == "new"
+    finally:
+        release_old.set()
+        for task in (old_task, stop_task, new_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(old_task, stop_task, new_task, return_exceptions=True)
+        await loop.aclose()
 
 
 @pytest.mark.asyncio

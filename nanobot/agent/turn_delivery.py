@@ -289,6 +289,10 @@ class TurnDelivery:
         self._stop_reason = stop_reason
         self._failure_error_kind = failure_error_kind
 
+    @property
+    def stop_reason(self) -> str | None:
+        return self._stop_reason
+
     def background_response(
         self,
         content: str | None,

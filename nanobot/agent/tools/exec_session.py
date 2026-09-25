@@ -16,8 +16,8 @@ from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import (
     RequestContext,
     ToolContext,
+    current_exec_session_owner,
     current_request_context,
-    current_request_session_key,
 )
 from nanobot.agent.tools.schema import (
     BooleanSchema,
@@ -634,7 +634,7 @@ class ExecSessionTool(Tool):
                     terminate=True,
                     yield_time_ms=0,
                     max_output_chars=DEFAULT_MAX_OUTPUT_CHARS,
-                    owner_session_key=current_request_session_key(),
+                    owner_session_key=current_exec_session_owner(),
                     require_private_isolation=private_isolated,
                 )
                 result = format_session_poll(session_id, poll)
@@ -697,7 +697,7 @@ class ExecSessionTool(Tool):
                 terminate=False,
                 yield_time_ms=step_ms,
                 max_output_chars=MAX_OUTPUT_CHARS,
-                owner_session_key=current_request_session_key(),
+                owner_session_key=current_exec_session_owner(),
                 require_private_isolation=private_isolated,
             )
             first = False
@@ -779,7 +779,7 @@ class ListExecSessionsTool(Tool):
             return ToolResult.error(sandbox.PRIVATE_SESSION_SHELL_ISOLATION_ERROR)
         try:
             sessions = await self._manager.list(
-                owner_session_key=current_request_session_key(),
+                owner_session_key=current_exec_session_owner(),
                 require_private_isolation=(
                     request is not None and not request.session_persist
                 ),

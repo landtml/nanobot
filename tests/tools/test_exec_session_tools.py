@@ -26,6 +26,7 @@ from nanobot.agent.tools.exec_session import (
 )
 from nanobot.agent.tools.registry import is_tool_error_result
 from nanobot.agent.tools.shell import ExecTool
+from nanobot.orchestration.supervisor import RunRegistry
 
 
 def _python_command(code: str) -> str:
@@ -740,6 +741,48 @@ def test_exec_sessions_are_scoped_to_request_session_key(tmp_path):
     assert other_listing == "No active exec sessions."
     assert other_write == f"Error: exec session not found: {sid!r}"
     assert "Session terminated." in cleanup
+
+
+def test_exec_tool_session_uses_scoped_run_owner_and_closes_on_completion(tmp_path):
+    async def run() -> tuple[str, str, str, int]:
+        manager = ExecSessionManager()
+        exec_tool = ExecTool(working_dir=str(tmp_path), timeout=5, session_manager=manager)
+        list_tool = ListExecSessionsTool(manager=manager)
+        session_tool = ExecSessionTool(manager=manager)
+        registry = RunRegistry()
+
+        async def cleanup(run_id: str) -> None:
+            await manager.terminate_by_owner(f"run:{run_id}")
+
+        registry.add_terminal_cleanup(cleanup)
+        root = await registry.ensure_session_root("session:one")
+        registry.register("turn-1", parent_id=root.id, root_id=root.id)
+        await registry.start("turn-1")
+        token = bind_request_context(RequestContext(
+            channel="cli",
+            chat_id="one",
+            session_key="session:one",
+            exec_session_owner_key="run:turn-1",
+        ))
+        try:
+            initial = await exec_tool.execute(
+                command=_waiting_shell_command("ready"),
+                yield_time_ms=50,
+            )
+            session_id = _session_id(initial)
+            listing = await list_tool.execute()
+            polled = await session_tool.execute(session_id=session_id, timeout_ms=0)
+        finally:
+            reset_request_context(token)
+
+        await registry.finish("turn-1", "completed")
+        return session_id, listing, polled, len(manager._sessions)
+
+    session_id, listing, polled, remaining = asyncio.run(run())
+
+    assert session_id in listing
+    assert polled.startswith("Process running.")
+    assert remaining == 0
 
 
 def test_list_exec_sessions_reports_empty_state():
