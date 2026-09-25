@@ -1,0 +1,287 @@
+"""Baseline measurements for the pre-kernel subagent path.
+
+Existing focused tests continue to characterize injection, deduplication,
+usage attribution, message limits, reply timeouts, and background spawning.
+This module adds a deterministic three-child turn and /stop latency baseline.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+from pathlib import Path
+from time import perf_counter
+from typing import Any
+
+import pytest
+from agent.session_helpers import run_session
+from loguru import logger
+
+from nanobot.agent.context import TranscriptInput
+from nanobot.agent.loop import AgentLoop
+from nanobot.agent.runner import AgentRunResult, AgentRunSpec
+from nanobot.agent.tools.context import current_request_context
+from nanobot.bus.events import InboundMessage
+from nanobot.bus.queue import MessageBus
+from nanobot.command.router import CommandContext
+from nanobot.config.schema import Config, ToolsConfig
+from nanobot.providers.base import LLMResponse, ToolCallRequest
+from nanobot.utils.llm_runtime import LLMRuntime
+from orchestration.sim import (
+    Fault,
+    FaultInjector,
+    ScriptedProvider,
+    SimulatedCrashError,
+    SimulatedRateLimitError,
+    SimulatedTimeoutError,
+    VirtualClock,
+)
+
+
+def _resolved_tools_config() -> ToolsConfig:
+    # Resolve tool-local forward refs before constructing AgentLoop in isolation.
+    return Config().tools
+
+
+def _route_request(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, str) and content.startswith("child-"):
+                return content
+    return "parent"
+
+
+@pytest.mark.asyncio
+async def test_three_waiting_children_finish_in_one_parent_turn(
+    tmp_path: Path,
+    record_property: Callable[[str, object], None],
+) -> None:
+    child_calls = [
+        ToolCallRequest(
+            id=f"spawn-{index}",
+            name="spawn",
+            arguments={"task": f"child-{index}", "wait": True},
+        )
+        for index in range(1, 4)
+    ]
+    provider = ScriptedProvider(
+        {
+            "parent": [
+                LLMResponse(content=None, tool_calls=child_calls, finish_reason="tool_calls"),
+                LLMResponse(content="all children finished"),
+            ],
+            **{
+                f"child-{index}": [LLMResponse(content=f"child-{index} finished")]
+                for index in range(1, 4)
+            },
+        },
+        route=_route_request,
+    )
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        model="test-model",
+        max_concurrent_subagents=3,
+        tools_config=_resolved_tools_config(),
+    )
+
+    started = perf_counter()
+    try:
+        await run_session(
+            loop,
+            InboundMessage(
+                channel="cli",
+                sender_id="user",
+                chat_id="direct",
+                content="delegate three children",
+            ),
+        )
+    finally:
+        await loop.aclose()
+    elapsed = perf_counter() - started
+    parent_calls = sum(call.route == "parent" for call in provider.calls)
+    observed_children = {call.route for call in provider.calls} - {"parent"}
+    record_property("p00_parent_model_calls_for_3_children", parent_calls)
+    record_property("p00_3_child_turn_seconds", elapsed)
+
+    assert parent_calls == 2
+    assert observed_children == {"child-1", "child-2", "child-3"}
+    assert elapsed < 1.0
+    print(
+        f"P00 baseline: 3 children, {parent_calls} parent model calls, "
+        f"{elapsed * 1000:.1f} ms wall time"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_a_child_and_records_latency(
+    tmp_path: Path,
+    record_property: Callable[[str, object], None],
+) -> None:
+    provider = ScriptedProvider({}, route=_route_request)
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        model="test-model",
+        tools_config=_resolved_tools_config(),
+    )
+    runtime: LLMRuntime = loop.llm_runtime()
+    child_started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+
+    async def blocked_run(_spec: AgentRunSpec) -> AgentRunResult:
+        child_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            raise
+        raise AssertionError("cancelled child unexpectedly continued")
+
+    loop.subagents.runner.run = blocked_run
+    try:
+        await loop.subagents.spawn(
+            "blocked child",
+            runtime=runtime,
+            session_key="cli:direct",
+        )
+        await asyncio.wait_for(child_started.wait(), timeout=1.0)
+        started = perf_counter()
+        message = InboundMessage(
+            channel="cli",
+            sender_id="user",
+            chat_id="direct",
+            content="/stop",
+        )
+        command_context = CommandContext(
+            msg=message,
+            session=loop.sessions.get_or_create("cli:direct"),
+            key="cli:direct",
+            raw="/stop",
+            loop=loop,
+        )
+        stopped = await loop.commands.dispatch_priority(command_context)
+        elapsed = perf_counter() - started
+    finally:
+        await loop.aclose()
+
+    record_property("p00_stop_cancel_latency_seconds", elapsed)
+    assert stopped is not None and "stopped 1 task" in stopped.content.lower()
+    assert child_cancelled.is_set()
+    assert elapsed < 1.0
+    print(f"P00 baseline: /stop cancelled a child in {elapsed * 1000:.1f} ms")
+
+
+@pytest.mark.asyncio
+async def test_private_parent_child_cannot_read_observations_or_log_task_label(
+    tmp_path: Path,
+) -> None:
+    observations = tmp_path / "memory" / "observations.md"
+    observations.parent.mkdir(parents=True)
+    observations.write_text("synthetic private observation")
+    child_policy: list[tuple[bool, bool]] = []
+
+    def route(messages: list[dict[str, Any]]) -> str:
+        selected = _route_request(messages)
+        if selected.startswith("child-"):
+            request = current_request_context()
+            assert request is not None
+            child_policy.append((request.session_persist, request.log_content))
+        return selected
+
+    provider = ScriptedProvider(
+        {
+            "parent": [
+                LLMResponse(content=None, tool_calls=[ToolCallRequest(
+                    id="spawn-private",
+                    name="spawn",
+                    arguments={
+                        "task": "child-read-observations",
+                        "label": "synthetic-private-label",
+                        "wait": True,
+                    },
+                )], finish_reason="tool_calls"),
+                LLMResponse(content="Private child finished."),
+            ],
+            "child-read-observations": [
+                LLMResponse(content=None, tool_calls=[ToolCallRequest(
+                    id="read-private-observations",
+                    name="read_file",
+                    arguments={"path": "memory/observations.md"},
+                )], finish_reason="tool_calls"),
+                LLMResponse(content="I could not read private observations."),
+            ],
+        },
+        route=route,
+    )
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        model="test-model",
+        tools_config=_resolved_tools_config(),
+    )
+    session = loop.sessions.get_or_create_transient("cli:private-child")
+    logs: list[str] = []
+    sink = logger.add(lambda message: logs.append(str(message)), format="{message}")
+    try:
+        result = await loop._run_agent_loop(
+            TranscriptInput(history=[], current_message="delegate a private child"),
+            runtime=loop.llm_runtime(),
+            session=session,
+        )
+    finally:
+        logger.remove(sink)
+        await loop.aclose()
+
+    child_calls = [call for call in provider.calls if call.route == "child-read-observations"]
+    child_tool_result = next(
+        message["content"]
+        for message in child_calls[1].messages
+        if message.get("role") == "tool"
+    )
+    assert result.final_content == "Private child finished."
+    assert child_policy and all(policy == (False, False) for policy in child_policy)
+    assert "Private sessions cannot access memory/observations.md" in child_tool_result
+    assert "synthetic private observation" not in str(child_calls[1].messages)
+    assert "synthetic-private-label" not in "\n".join(logs)
+
+
+@pytest.mark.asyncio
+async def test_fault_injector_covers_provider_failures_and_slow_tools() -> None:
+    clock = VirtualClock()
+    faults = FaultInjector(clock)
+    faults.add("provider:crash", Fault("crash"))
+    faults.add("provider:rate-limit", Fault("rate_limit"))
+    faults.add("provider:timeout", Fault("timeout"))
+    faults.add("tool:slow", Fault("slow_tool", delay=5.0))
+
+    with pytest.raises(SimulatedCrashError):
+        await faults.trip("provider:crash")
+    with pytest.raises(SimulatedRateLimitError):
+        await faults.trip("provider:rate-limit")
+    with pytest.raises(SimulatedTimeoutError):
+        await faults.trip("provider:timeout")
+
+    slow_tool = asyncio.create_task(faults.trip("tool:slow"))
+    await asyncio.sleep(0)
+    assert not slow_tool.done()
+    clock.advance(5.0)
+    await slow_tool
+    assert clock.time() == 5.0
+
+    provider = ScriptedProvider(
+        {"parent": [LLMResponse(content="recovered scripted response")]},
+        route=lambda _messages: "parent",
+        faults=FaultInjector(
+            clock,
+            {"provider:parent": [Fault("rate_limit")]},
+        ),
+    )
+    provider._CHAT_RETRY_DELAYS = (0,)
+    response = await provider.chat_stream_with_retry(messages=[])
+    assert response.content == "recovered scripted response"
+    assert len(provider.calls) == 2

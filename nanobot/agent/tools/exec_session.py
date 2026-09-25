@@ -11,8 +11,14 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
+from nanobot.agent.tools import sandbox
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
-from nanobot.agent.tools.context import ToolContext, current_request_session_key
+from nanobot.agent.tools.context import (
+    RequestContext,
+    ToolContext,
+    current_request_context,
+    current_request_session_key,
+)
 from nanobot.agent.tools.schema import (
     BooleanSchema,
     IntegerSchema,
@@ -125,12 +131,14 @@ class _ExecSession:
         timeout: int | None,
         owner_session_key: str | None = None,
         process_tree: bool = False,
+        private_isolated: bool = False,
     ) -> None:
         self.session_id = session_id
         self.process = process
         self.command = command
         self.cwd = cwd
         self.owner_session_key = owner_session_key
+        self.private_isolated = private_isolated
         self._process_tree = process_tree
         self.started_at = time.monotonic()
         # timeout None/0 means no limit; an infinite deadline is never reached.
@@ -289,6 +297,7 @@ class ExecSessionManager:
         yield_time_ms: int,
         max_output_chars: int,
         owner_session_key: str | None = None,
+        private_isolated: bool = False,
     ) -> tuple[str, _SessionPoll]:
         async with self._lock:
             if self._closed:
@@ -306,6 +315,7 @@ class ExecSessionManager:
                 timeout=timeout,
                 owner_session_key=owner_session_key,
                 process_tree=True,
+                private_isolated=private_isolated,
             )
             self._sessions[session_id] = session
 
@@ -325,6 +335,7 @@ class ExecSessionManager:
         yield_time_ms: int,
         max_output_chars: int,
         owner_session_key: str | None = None,
+        require_private_isolation: bool = False,
     ) -> _SessionPoll:
         async with self._lock:
             await self._cleanup_locked()
@@ -332,6 +343,8 @@ class ExecSessionManager:
         if session is None:
             raise KeyError(session_id)
         if session.owner_session_key and session.owner_session_key != owner_session_key:
+            raise KeyError(session_id)
+        if require_private_isolation and not session.private_isolated:
             raise KeyError(session_id)
 
         if chars:
@@ -357,7 +370,12 @@ class ExecSessionManager:
                 self._sessions.pop(session_id, None)
         return poll
 
-    async def list(self, *, owner_session_key: str | None = None) -> list[ExecSessionInfo]:
+    async def list(
+        self,
+        *,
+        owner_session_key: str | None = None,
+        require_private_isolation: bool = False,
+    ) -> list[ExecSessionInfo]:
         async with self._lock:
             await self._cleanup_locked()
             now = time.monotonic()
@@ -374,6 +392,7 @@ class ExecSessionManager:
                 )
                 for session_id, session in sorted(self._sessions.items())
                 if session.owner_session_key == owner_session_key
+                and (not require_private_isolation or session.private_isolated)
             ]
 
     async def close_all(self) -> int:
@@ -568,6 +587,13 @@ class ExecSessionTool(Tool):
     def description(self) -> str:
         return "Manage a session returned by exec."
 
+    def available_in_context(self, request: RequestContext | None) -> bool:
+        return (
+            request is None
+            or request.session_persist
+            or sandbox.private_session_sandbox_backend() is not None
+        )
+
     async def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         session_id: str,
@@ -579,6 +605,10 @@ class ExecSessionTool(Tool):
         timeout_ms: int | None = None,
         **kwargs: Any,
     ) -> str:
+        request = current_request_context()
+        if not self.available_in_context(request):
+            return ToolResult.error(sandbox.PRIVATE_SESSION_SHELL_ISOLATION_ERROR)
+        private_isolated = request is not None and not request.session_persist
         try:
             if wait_for == "":
                 return ToolResult.error("Error: wait_for must not be empty.")
@@ -605,6 +635,7 @@ class ExecSessionTool(Tool):
                     yield_time_ms=0,
                     max_output_chars=DEFAULT_MAX_OUTPUT_CHARS,
                     owner_session_key=current_request_session_key(),
+                    require_private_isolation=private_isolated,
                 )
                 result = format_session_poll(session_id, poll)
                 return ToolResult.error(result) if poll.timed_out else result
@@ -628,6 +659,7 @@ class ExecSessionTool(Tool):
                     0,
                     MAX_WAIT_FOR_MS,
                 ),
+                private_isolated=private_isolated,
             )
         except KeyError:
             return ToolResult.error(f"Error: exec session not found: {session_id!r}")
@@ -643,7 +675,11 @@ class ExecSessionTool(Tool):
         wait_for: str | None,
         until_exit: bool,
         timeout_ms: int,
+        private_isolated: bool | None = None,
     ) -> str:
+        if private_isolated is None:
+            request = current_request_context()
+            private_isolated = request is not None and not request.session_persist
         deadline = time.monotonic() + (timeout_ms / 1000)
         aggregate = _BoundedOutputBuffer(DEFAULT_MAX_OUTPUT_CHARS)
         upstream_truncated = 0
@@ -662,6 +698,7 @@ class ExecSessionTool(Tool):
                 yield_time_ms=step_ms,
                 max_output_chars=MAX_OUTPUT_CHARS,
                 owner_session_key=current_request_session_key(),
+                require_private_isolation=private_isolated,
             )
             first = False
             upstream_truncated += poll.truncated_chars
@@ -725,14 +762,27 @@ class ListExecSessionsTool(Tool):
     def description(self) -> str:
         return "List active exec sessions."
 
+    def available_in_context(self, request: RequestContext | None) -> bool:
+        return (
+            request is None
+            or request.session_persist
+            or sandbox.private_session_sandbox_backend() is not None
+        )
+
     @property
     def read_only(self) -> bool:
         return True
 
     async def execute(self, **kwargs: Any) -> str:
+        request = current_request_context()
+        if not self.available_in_context(request):
+            return ToolResult.error(sandbox.PRIVATE_SESSION_SHELL_ISOLATION_ERROR)
         try:
             sessions = await self._manager.list(
                 owner_session_key=current_request_session_key(),
+                require_private_isolation=(
+                    request is not None and not request.session_persist
+                ),
             )
             if not sessions:
                 return "No active exec sessions."

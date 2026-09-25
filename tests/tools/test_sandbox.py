@@ -1,6 +1,9 @@
 """Tests for nanobot.agent.tools.sandbox."""
 
 import shlex
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -37,6 +40,49 @@ class TestBwrapBackend:
 
         bind_idx = [i for i, t in enumerate(tokens) if t == "--bind"]
         assert any(tokens[i + 1] == ws and tokens[i + 2] == ws for i in bind_idx)
+
+    def test_denied_read_path_is_overlaid_after_workspace_binds(self, tmp_path):
+        ws = tmp_path / "project"
+        protected = ws / "memory" / "observations.md"
+        tokens = _parse(
+            wrap_command(
+                "bwrap",
+                "cat memory/observations.md",
+                str(ws),
+                str(ws),
+                denied_read_paths=[str(protected)],
+            )
+        )
+
+        workspace_bind = next(
+            i for i, token in enumerate(tokens)
+            if token == "--bind" and tokens[i + 1] == str(ws) and tokens[i + 2] == str(ws)
+        )
+        deny_bind = next(
+            i for i, token in enumerate(tokens)
+            if token == "--ro-bind-try" and tokens[i + 1:i + 3] == ["/dev/null", str(protected)]
+        )
+        assert deny_bind > workspace_bind
+
+    @pytest.mark.skipif(sys.platform != "linux" or shutil.which("bwrap") is None, reason="bwrap unavailable")
+    def test_bwrap_cannot_read_denied_file(self, tmp_path):
+        ws = tmp_path / "project"
+        protected = ws / "memory" / "observations.md"
+        protected.parent.mkdir(parents=True)
+        protected.write_text("private marker", encoding="utf-8")
+        command = wrap_command(
+            "bwrap",
+            f"cat {shlex.quote(str(protected))}",
+            str(ws),
+            str(ws),
+            denied_read_paths=[str(protected)],
+        )
+
+        result = subprocess.run(_parse(command), capture_output=True, text=True, timeout=10)
+
+        assert "private marker" not in result.stdout
+        assert result.returncode == 1
+        assert str(protected) in result.stderr
 
     def test_home_env_points_to_workspace(self, tmp_path):
         ws = str(tmp_path / "project")
@@ -283,6 +329,27 @@ class TestSeatbeltBackend:
         profile = self._profile(wrap_command("seatbelt", "ls", str(ws), str(ws)))
 
         assert f"(allow file-read* file-write* (subpath {self._quote(ws)}))" in profile
+
+    def test_denied_read_path_overrides_workspace_access(self, tmp_path):
+        ws = (tmp_path / "project").resolve()
+        protected = ws / "memory" / "observations.md"
+        profile = self._profile(
+            wrap_command(
+                "seatbelt",
+                "cat memory/observations.md",
+                str(ws),
+                str(ws),
+                denied_read_paths=[str(protected)],
+            )
+        )
+
+        workspace_allow = profile.index(
+            f"(allow file-read* file-write* (subpath {self._quote(ws)}))"
+        )
+        protected_deny = profile.index(
+            f"(deny file-read* file-write* (literal {self._quote(protected)}))"
+        )
+        assert protected_deny > workspace_allow
 
     def test_config_dir_denied_before_workspace_allow(self, tmp_path):
         """Last matching rule wins, so the parent deny must come first.

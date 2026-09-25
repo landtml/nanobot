@@ -58,7 +58,7 @@ phases:
 
   - id: P00
     title: Baseline, simulator, privacy fix
-    status: todo
+    status: in_review
     depends_on: []
     goal: Freeze today's behaviour in tests and build the simulator every later phase uses.
     create:
@@ -66,16 +66,32 @@ phases:
       - tests/orchestration/sim.py            # ScriptedProvider, VirtualClock, faults: crash, rate_limit, timeout, slow_tool
       - tests/orchestration/test_baseline_subagents.py
     touch:
-      - nanobot/agent/tools/filesystem.py     # I5: drop extra_read_allowed_files for non-durable sessions
+      - nanobot/agent/loop.py                 # capture active session policy at the tool boundary
+      - nanobot/agent/subagent.py             # carry privacy and logging policy into child runs
+      - nanobot/agent/tools/context.py        # expose session persistence in request context
+      - nanobot/agent/tools/filesystem.py     # deny private reads of observations.md
+      - nanobot/agent/tools/search.py         # keep private grep from returning observations.md
+      - nanobot/agent/tools/base.py           # per-request tool availability contract
+      - nanobot/agent/tools/registry.py       # filter unavailable tools, names, and direct calls
+      - nanobot/agent/tools/shell.py          # enforce private process isolation at launch
+      - nanobot/agent/tools/exec_session.py   # apply private-session tool availability
+      - nanobot/agent/tools/sandbox.py        # probe native isolation and mask protected paths
     approach:
       - Reuse tests/agent/runner_helpers.py and session_helpers.py; do not duplicate fakes.
       - Characterize: spawn background and wait=true, result injection mid-turn vs idle parent, /stop cancels children, dedup by subagent_task_id, usage source attribution, session message rate limit and reply timeout.
       - Record baseline metrics in the test output (parent model calls per N children, cancel latency) for later comparison.
       - "Privacy fix: read the active session's policy (SessionPolicy.persist) at call time via request context; keep the allowance for durable sessions."
+      - "I5 shell boundary: use bubblewrap or Seatbelt to mask observations.md for private exec launches; hide exec, exec_session, and list_exec_sessions and reject direct calls when a native isolation probe fails."
+      - "Managed shell sessions carry their isolation provenance; private callers cannot inspect or control a session started without private isolation, even when a session key is reused."
+      - "Private launches use a trusted non-login system shell; custom shells and login startup files are refused, and path overrides run inside the OS sandbox so they cannot replace its launcher."
+      - "Runtime tool-name reporting follows the same per-request availability policy as the model-facing tool schema."
     done_when:
       - Baseline tests pass on the unchanged code.
       - Simulator can run a parent turn with 3 children in < 1 s wall time.
       - Test proves a private session's read_file of memory/observations.md is refused; durable sessions still read it.
+      - Tests prove immediate and managed private exec cannot read memory/observations.md while a control command succeeds; without supported isolation, shell tools are withheld and direct exec fails closed.
+      - Test proves a private session cannot inspect or control a pre-existing managed shell process that was started without private isolation.
+      - Tests prove custom shells, login startup files, and path_prepend cannot execute before private isolation; unavailable shell tools are omitted from runtime capability names.
 
   - id: P01
     title: Single executor

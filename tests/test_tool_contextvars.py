@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nanobot.agent.tools.context import RequestContext, request_context
+from nanobot.agent.tools.context import RequestContext, current_request_context, request_context
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
@@ -57,7 +57,7 @@ async def test_message_tool_keeps_task_local_context() -> None:
 
 @pytest.mark.asyncio
 async def test_spawn_tool_keeps_task_local_context() -> None:
-    seen: list[tuple[str, str, str]] = []
+    seen: list[tuple[str, str, str, bool]] = []
     entered = asyncio.Event()
     release = asyncio.Event()
 
@@ -80,7 +80,13 @@ async def test_spawn_tool_keeps_task_local_context() -> None:
             temperature: float | None = None,
             workspace_scope=None,
         ) -> str:
-            seen.append((origin_channel, origin_chat_id, session_key))
+            request = current_request_context()
+            seen.append((
+                origin_channel,
+                origin_chat_id,
+                session_key,
+                request.session_persist if request else True,
+            ))
             return f"{origin_channel}:{origin_chat_id}:{task}"
 
     tool = SpawnTool(_Manager())
@@ -90,6 +96,7 @@ async def test_spawn_tool_keeps_task_local_context() -> None:
             channel="whatsapp",
             chat_id="chat-a",
             runtime=_runtime("model-a"),
+            session_persist=False,
         )):
             entered.set()
             await release.wait()
@@ -109,8 +116,8 @@ async def test_spawn_tool_keeps_task_local_context() -> None:
 
     assert result_one == "whatsapp:chat-a:one"
     assert result_two == "telegram:chat-b:two"
-    assert ("whatsapp", "chat-a", "whatsapp:chat-a") in seen
-    assert ("telegram", "chat-b", "telegram:chat-b") in seen
+    assert ("whatsapp", "chat-a", "whatsapp:chat-a", False) in seen
+    assert ("telegram", "chat-b", "telegram:chat-b", True) in seen
 
 
 @pytest.mark.asyncio

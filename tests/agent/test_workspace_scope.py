@@ -265,6 +265,103 @@ async def test_restricted_project_reads_observations_from_linked_agent_workspace
 
 
 @pytest.mark.asyncio
+async def test_private_session_cannot_read_observations_with_full_workspace_access(
+    tmp_path: Path,
+) -> None:
+    agent_workspace = tmp_path / "agent"
+    observations_file = agent_workspace / "memory" / "observations.md"
+    observations_file.parent.mkdir(parents=True)
+    observations_file.write_text("private history", encoding="utf-8")
+    tool = ReadFileTool.create(ToolContext(
+        config=ToolsConfig(restrict_to_workspace=False),
+        workspace=str(agent_workspace),
+    ))
+
+    with request_context(RequestContext(
+        channel="test",
+        chat_id="private",
+        session_persist=False,
+    )):
+        result = await tool.execute(path=str(observations_file))
+
+    assert "private session" in result.lower()
+    assert "private history" not in result
+
+
+@pytest.mark.asyncio
+async def test_private_session_cannot_read_observations_through_directory_link(
+    tmp_path: Path,
+) -> None:
+    agent_workspace = tmp_path / "agent"
+    observations_file = agent_workspace / "memory" / "observations.md"
+    linked_memory = tmp_path / "linked-memory"
+    observations_file.parent.mkdir(parents=True)
+    observations_file.write_text("private history", encoding="utf-8")
+    _make_directory_link(linked_memory, observations_file.parent)
+    tool = ReadFileTool.create(ToolContext(
+        config=ToolsConfig(restrict_to_workspace=False),
+        workspace=str(agent_workspace),
+    ))
+
+    with request_context(RequestContext(
+        channel="test",
+        chat_id="private",
+        session_persist=False,
+    )):
+        result = await tool.execute(path=str(linked_memory / "observations.md"))
+
+    assert "private session" in result.lower()
+    assert "private history" not in result
+
+
+@pytest.mark.asyncio
+async def test_private_grep_skips_observations_in_directory_search(tmp_path: Path) -> None:
+    agent_workspace = tmp_path / "agent"
+    observations_file = agent_workspace / "memory" / "observations.md"
+    observations_file.parent.mkdir(parents=True)
+    observations_file.write_text("private history", encoding="utf-8")
+    tool = GrepTool.create(ToolContext(
+        config=ToolsConfig(restrict_to_workspace=False),
+        workspace=str(agent_workspace),
+    ))
+
+    with request_context(RequestContext(
+        channel="test",
+        chat_id="private",
+        session_persist=False,
+    )):
+        result = await tool.execute(
+            pattern="private history",
+            path=str(agent_workspace),
+            output_mode="content",
+        )
+
+    assert "memory/observations.md:" not in result
+
+
+@pytest.mark.asyncio
+async def test_durable_quiet_session_can_read_observations(tmp_path: Path) -> None:
+    agent_workspace = tmp_path / "agent"
+    observations_file = agent_workspace / "memory" / "observations.md"
+    observations_file.parent.mkdir(parents=True)
+    observations_file.write_text("durable history", encoding="utf-8")
+    tool = ReadFileTool.create(ToolContext(
+        config=ToolsConfig(restrict_to_workspace=False),
+        workspace=str(agent_workspace),
+    ))
+
+    with request_context(RequestContext(
+        channel="test",
+        chat_id="quiet-durable",
+        session_persist=True,
+        log_content=False,
+    )):
+        result = await tool.execute(path=str(observations_file))
+
+    assert "durable history" in result
+
+
+@pytest.mark.asyncio
 async def test_filesystem_write_tool_full_scope_allows_outside_project(tmp_path: Path) -> None:
     project = tmp_path / "project"
     outside = tmp_path / "outside"

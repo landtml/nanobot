@@ -14,7 +14,7 @@ from nanobot.agent.subagent import (
     SubagentStatus,
     _SubagentHook,
 )
-from nanobot.agent.tools.context import current_request_context
+from nanobot.agent.tools.context import RequestContext, current_request_context, request_context
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import GenerationSettings, LLMProvider, LLMUsage
 from nanobot.utils.llm_runtime import LLMRuntime
@@ -306,6 +306,12 @@ class TestSpawn:
             seen["spec_runtime"] = spec.runtime
             request_ctx = current_request_context()
             seen["context_runtime"] = request_ctx.runtime if request_ctx else None
+            seen["context_session_persist"] = (
+                request_ctx.session_persist if request_ctx else None
+            )
+            seen["context_log_content"] = (
+                request_ctx.log_content if request_ctx else None
+            )
             entered.set()
             await release.wait()
             return AgentRunResult(
@@ -315,7 +321,14 @@ class TestSpawn:
             )
 
         sm.runner.run = observe
-        await sm.spawn("task", runtime=runtime, session_key="s1")
+        with request_context(RequestContext(
+            channel="test",
+            chat_id="chat",
+            runtime=runtime,
+            session_persist=False,
+            log_content=False,
+        )):
+            await sm.spawn("task", runtime=runtime, session_key="s1")
         runtime.provider.generation = GenerationSettings(
             temperature=0.9,
             max_tokens=128,
@@ -324,6 +337,8 @@ class TestSpawn:
 
         assert seen["spec_runtime"] is runtime
         assert seen["context_runtime"] is runtime
+        assert seen["context_session_persist"] is False
+        assert seen["context_log_content"] is False
         assert runtime.generation.temperature == 0.2
 
         release.set()

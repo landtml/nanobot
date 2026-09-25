@@ -306,6 +306,7 @@ async def test_spawn_tool_waits_for_inline_result():
         chat_id="c1",
         session_key="test:c1",
         runtime=runtime,
+        session_persist=False,
     )):
         result = await tool.execute(task="review this", wait=True)
 

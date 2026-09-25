@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
-from nanobot.agent.tools.context import ToolContext
+from nanobot.agent.tools.context import ToolContext, current_request_context
 from nanobot.agent.tools.file_state import FileStates, current_file_states
 from nanobot.agent.tools.path_utils import resolve_workspace_path
 from nanobot.agent.tools.schema import (
@@ -149,6 +149,18 @@ class _FsTool(Tool):
         )
 
     def _resolve_read(self, path: str) -> Path:
+        protected_path = self._private_observations_path()
+        extra_allowed_files = self._extra_read_allowed_files
+        if protected_path is not None and self._resolves_to(path, protected_path):
+            raise PermissionError(
+                "Private sessions cannot access memory/observations.md"
+            )
+        if protected_path is not None:
+            extra_allowed_files = [
+                allowed
+                for allowed in extra_allowed_files
+                if not self._resolves_to(allowed, protected_path)
+            ]
         plugin_skill_dirs: list[Path] = []
         if self._workspace is not None:
             from nanobot.agent.plugins import enabled_agent_plugin_skill_dirs
@@ -174,10 +186,39 @@ class _FsTool(Tool):
         return self._resolve_with_extra(
             path,
             [*self._extra_read_allowed_dirs, *plugin_skill_dirs],
-            self._extra_read_allowed_files,
+            extra_allowed_files,
             include_media_dir=True,
             extra_files_require_allowed_root=True,
         )
+
+    def _observations_path(self) -> Path | None:
+        if self._workspace is None:
+            return None
+        return (Path(self._workspace).expanduser() / "memory" / "observations.md").resolve(
+            strict=False
+        )
+
+    def _private_observations_path(self) -> Path | None:
+        request_ctx = current_request_context()
+        if request_ctx is None or request_ctx.session_persist:
+            return None
+        return self._observations_path()
+
+    def _resolves_to(self, path: str | Path, target: Path) -> bool:
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            access = current_tool_workspace(
+                self._workspace,
+                restrict_to_workspace=self._restrict_to_workspace,
+                sandbox_restricts_workspace=self._sandbox_restricts_workspace,
+            )
+            base = access.project_path or self._workspace
+            if base is not None:
+                candidate = Path(base) / candidate
+        try:
+            return candidate.resolve(strict=False) == target
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return False
 
     def _resolve_write(self, path: str) -> Path:
         return self._resolve_with_extra(

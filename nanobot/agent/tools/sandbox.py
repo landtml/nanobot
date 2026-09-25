@@ -7,10 +7,20 @@ and register it in _BACKENDS below.
 
 import os
 import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
 from nanobot.config.paths import get_media_dir
+
+PRIVATE_SESSION_SHELL_ISOLATION_ERROR = (
+    "Error: Shell tools are unavailable in private sessions because "
+    "OS-level file isolation is unavailable on this platform."
+)
 
 
 def _normalize_bind_paths(
@@ -45,6 +55,48 @@ def _normalize_bind_paths(
     return out
 
 
+def _normalize_denied_read_paths(paths: Iterable[str] | None) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in paths or []:
+        path = Path(os.path.expandvars(str(raw))).expanduser()
+        if not path.is_absolute():
+            continue
+        resolved = str(path.resolve(strict=False))
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append(resolved)
+    return out
+
+
+@lru_cache(maxsize=1)
+def private_session_sandbox_backend() -> str | None:
+    """Return a native sandbox backend only when it can launch a probe."""
+    if sys.platform.startswith("linux"):
+        if shutil.which("bwrap") is None:
+            return None
+        backend = "bwrap"
+    elif sys.platform == "darwin" and os.access("/usr/bin/sandbox-exec", os.X_OK):
+        backend = "seatbelt"
+    else:
+        return None
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="nanobot-private-sandbox-") as workspace:
+            wrapped = wrap_command(backend, "true", workspace, workspace)
+            result = subprocess.run(
+                shlex.split(wrapped),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=False,
+            )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return backend if result.returncode == 0 else None
+
+
 def _bwrap(
     command: str,
     workspace: str,
@@ -52,6 +104,7 @@ def _bwrap(
     *,
     sandbox_ro_binds: Iterable[str] | None = None,
     sandbox_rw_binds: Iterable[str] | None = None,
+    denied_read_paths: Iterable[str] | None = None,
 ) -> str:
     """Wrap command in a bubblewrap sandbox (requires bwrap in container).
 
@@ -97,6 +150,8 @@ def _bwrap(
         args += ["--ro-bind-try", p, p]
     for p in _normalize_bind_paths(sandbox_rw_binds, workspace=ws):
         args += ["--bind-try", p, p]
+    for p in _normalize_denied_read_paths(denied_read_paths):
+        args += ["--ro-bind-try", "/dev/null", p]
     args += ["--chdir", sandbox_cwd, "--", "sh", "-c", command]
     return shlex.join(args)
 
@@ -188,6 +243,7 @@ def _seatbelt(
     *,
     sandbox_ro_binds: Iterable[str] | None = None,
     sandbox_rw_binds: Iterable[str] | None = None,
+    denied_read_paths: Iterable[str] | None = None,
 ) -> str:
     """Wrap command in a macOS Seatbelt sandbox (requires sandbox-exec(1)).
 
@@ -272,6 +328,10 @@ def _seatbelt(
     for p in rw_binds:
         rules.append(f"(allow file-read* file-write* (subpath {_sbpl_quote(p)}))")
 
+    for p in _normalize_denied_read_paths(denied_read_paths):
+        rules.append(f"(deny file-read* file-write* (literal {_sbpl_quote(p)}))")
+        rules.append(f"(deny file-write-unlink (literal {_sbpl_quote(p)}))")
+
     # Path-based read-only rules do not follow a renamed ancestor. Keep those
     # directory entries fixed without denying writes to their other children.
     # A RW bind covering the entire RO root intentionally overrides protection;
@@ -317,6 +377,7 @@ def wrap_command(
     *,
     sandbox_ro_binds: Iterable[str] | None = None,
     sandbox_rw_binds: Iterable[str] | None = None,
+    denied_read_paths: Iterable[str] | None = None,
 ) -> str:
     """Wrap *command* using the named sandbox backend."""
     if backend := _BACKENDS.get(sandbox):
@@ -326,5 +387,6 @@ def wrap_command(
             cwd,
             sandbox_ro_binds=sandbox_ro_binds,
             sandbox_rw_binds=sandbox_rw_binds,
+            denied_read_paths=denied_read_paths,
         )
     raise ValueError(f"Unknown sandbox backend {sandbox!r}. Available: {list(_BACKENDS)}")
