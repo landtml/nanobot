@@ -27,7 +27,7 @@ from nanobot.agent.cron_turns import CronTurnCoordinator
 from nanobot.agent.hook import AgentHook, AgentTurnHookFactory
 from nanobot.agent.memory import Memory
 from nanobot.agent.model_runtime import ModelRuntimeResolver
-from nanobot.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec
+from nanobot.agent.runner import AgentRunner, AgentRunResult
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.context import RequestContext, bind_request_context, reset_request_context
 from nanobot.agent.tools.exec_session import ExecSessionManager
@@ -53,6 +53,8 @@ from nanobot.command.router import normalize_command_text
 from nanobot.config.schema import AgentDefaults, ModelPresetConfig
 from nanobot.events import NO_EVENTS, AgentEvent, EventSink
 from nanobot.llm_usage.context import source_from_request
+from nanobot.orchestration.executor import RunExecutor
+from nanobot.orchestration.types import Budget, Capabilities, RunSpec
 from nanobot.providers.base import LLMProvider, LLMUsage, ProviderConversationState
 from nanobot.providers.factory import ProviderSnapshot
 from nanobot.runtime_context import (
@@ -1236,11 +1238,11 @@ class AgentLoop:
                 run_extra_hooks_for_ephemeral=run_extra_hooks_for_ephemeral,
                 log_content=request_ctx.log_content,
             ))
-            result = await self.runner.run(AgentRunSpec(
+            result = await RunExecutor.run(self.runner, RunSpec(
                 initial_messages=None,
                 tools=effective_tools,
                 runtime=runtime,
-                max_iterations=self.max_iterations,
+                budget=Budget(iterations=self.max_iterations),
                 max_tool_result_chars=self.max_tool_result_chars,
                 transcript_input=transcript_input,
                 transcript_builder=transcript_builder,
@@ -1271,6 +1273,11 @@ class AgentLoop:
                     metadata=request_metadata,
                 ),
                 events=events,
+                profile="main",
+                task=request_ctx.original_user_text or "",
+                caps=Capabilities(tools=frozenset(effective_tools.tool_names)),
+                context="fork",
+                durable=not ephemeral,
             ))
         finally:
             turn_scope_stack.close()
