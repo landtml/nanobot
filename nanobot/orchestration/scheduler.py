@@ -18,6 +18,7 @@ from nanobot.providers.base import (
     LLMCallObserver,
     LLMProvider,
     LLMResponse,
+    ProviderAdmissionError,
     ProviderCallContext,
     ProviderConversationState,
 )
@@ -47,6 +48,17 @@ _fallback_candidate_context: contextvars.ContextVar[bool] = contextvars.ContextV
 _fallback_admitted_callback: contextvars.ContextVar[
     Callable[[], Awaitable[None]] | None
 ] = contextvars.ContextVar("nanobot_scheduler_fallback_admitted_callback", default=None)
+
+
+@dataclass(slots=True)
+class _ReservedLease:
+    lease: LaneLease
+    claimed: bool = False
+
+
+_reserved_lease_context: contextvars.ContextVar[_ReservedLease | None] = (
+    contextvars.ContextVar("nanobot_scheduler_reserved_lease", default=None)
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,13 +92,16 @@ class LaneLease:
         self._released = False
 
     async def release(self, response: LLMResponse | None = None) -> None:
+        self.release_now(response)
+
+    def release_now(self, response: LLMResponse | None = None) -> None:
         if self._released:
             return
         self._released = True
         self._scheduler.release(self.lane, response)
 
 
-class LaneSaturatedError(Exception):
+class LaneSaturatedError(ProviderAdmissionError):
     """Internal signal that a fallback candidate was busy before provider I/O."""
 
     def __init__(self, scheduler: Scheduler, lane: ProviderLane) -> None:
@@ -161,6 +176,8 @@ class Scheduler:
         try:
             return await waiter.future
         except asyncio.CancelledError:
+            if waiter.future.done() and not waiter.future.cancelled():
+                waiter.future.result().release_now()
             self._remove_waiter(lane, waiter)
             self._drain(key, lane)
             raise
@@ -171,24 +188,58 @@ class Scheduler:
         if not unique_keys:
             raise ValueError("at least one provider lane is required")
         tasks = [asyncio.create_task(self.acquire(key)) for key in unique_keys]
+        selector = asyncio.create_task(self._select_lease(tasks))
         try:
-            done, pending = await asyncio.wait(
+            return await asyncio.shield(selector)
+        except asyncio.CancelledError:
+            selector.cancel()
+            try:
+                await asyncio.shield(selector)
+            except BaseException:
+                pass
+            if selector.done() and not selector.cancelled():
+                try:
+                    selector.result().release_now()
+                except BaseException:
+                    pass
+            raise
+
+    async def _select_lease(
+        self,
+        tasks: list[asyncio.Task[LaneLease]],
+    ) -> LaneLease:
+        try:
+            done, _pending = await asyncio.wait(
                 tasks, return_when=asyncio.FIRST_COMPLETED
             )
             winner = next(iter(done))
             lease = winner.result()
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            for task in done:
-                if task is not winner:
-                    await task.result().release()
+            for task in tasks:
+                if task is not winner and not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for task in tasks:
+                if task is winner or task.cancelled():
+                    continue
+                try:
+                    other_lease = task.result()
+                except BaseException:
+                    continue
+                other_lease.release_now()
             return lease
         except BaseException:
             for task in tasks:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            for task in tasks:
+                if task.cancelled():
+                    continue
+                try:
+                    lease = task.result()
+                except BaseException:
+                    continue
+                lease.release_now()
             raise
 
     def try_acquire(self, key: ProviderLane) -> LaneLease | None:
@@ -243,9 +294,23 @@ class Scheduler:
             raise RuntimeError("provider lane lease released without admission")
         lane.in_flight -= 1
         if response is not None:
+            error_kind = (
+                response.error_kind
+                if response.finish_reason == "error"
+                else None
+            )
+            status = response.error_status_code
+            if response.finish_reason == "error" and (
+                status == 429
+                or (
+                    (error_kind or "").lower() == "http"
+                    and "429" in (response.content or "")
+                )
+            ):
+                error_kind = "rate_limit"
             self.observe(
                 key,
-                error_kind=response.error_kind if response.finish_reason == "error" else None,
+                error_kind=error_kind,
                 retry_after=response.error_retry_after_s or response.retry_after,
             )
         self._drain(key, lane)
@@ -334,6 +399,9 @@ class ScheduledProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return self._provider.get_default_model()
+
+    def lane_for(self, model: str | None = None) -> ProviderLane:
+        return ProviderLane(self.provider_name, model or self.get_default_model())
 
     def set_llm_call_observer(self, observer: LLMCallObserver | None) -> None:
         super().set_llm_call_observer(observer)
@@ -441,9 +509,14 @@ class ScheduledProvider(LLMProvider):
         model: str,
         call: Callable[[], Awaitable[LLMResponse]],
     ) -> LLMResponse:
-        lane = ProviderLane(self.provider_name, model)
+        lane = self.lane_for(model)
         if _fallback_candidate_context.get():
-            lease = self._scheduler.try_acquire(lane)
+            reserved = _reserved_lease_context.get()
+            if reserved is not None and reserved.lease.lane == lane:
+                reserved.claimed = True
+                lease = reserved.lease
+            else:
+                lease = self._scheduler.try_acquire(lane)
             if lease is None:
                 raise LaneSaturatedError(self._scheduler, lane)
         else:
@@ -453,8 +526,11 @@ class ScheduledProvider(LLMProvider):
             if admitted_callback is not None:
                 await admitted_callback()
             response = await call()
-        except BaseException:
-            await lease.release()
+        except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError | ProviderAdmissionError):
+                await lease.release()
+            else:
+                await lease.release(_response_for_exception(exc))
             raise
         await lease.release(response)
         return response
@@ -475,6 +551,19 @@ def fallback_candidate_admission(
 
 
 @contextmanager
+def reserved_lane_lease(lease: LaneLease):
+    """Offer an acquired lane lease to the matching fallback candidate once."""
+    reservation = _ReservedLease(lease)
+    token = _reserved_lease_context.set(reservation)
+    try:
+        yield reservation
+    finally:
+        _reserved_lease_context.reset(token)
+        if not reservation.claimed:
+            lease.release_now()
+
+
+@contextmanager
 def scheduler_context(*, root: str | None = None, priority: Priority = "interactive"):
     """Bind per-call fairness identity and priority for the current task."""
     if priority not in _PRIORITIES:
@@ -486,3 +575,24 @@ def scheduler_context(*, root: str | None = None, priority: Priority = "interact
     finally:
         _priority_context.reset(priority_token)
         _root_context.reset(root_token)
+
+
+def _response_for_exception(exc: BaseException) -> LLMResponse:
+    if not isinstance(exc, Exception):
+        return LLMResponse(content=None, finish_reason="error")
+    response = LLMProvider.error_response_from_exception(exc)
+    retry_after: float | None = None
+    raw_retry_after = getattr(exc, "retry_after", None)
+    try:
+        retry_after = float(raw_retry_after) if raw_retry_after is not None else None
+    except (TypeError, ValueError):
+        retry_after = None
+    if retry_after is None:
+        error_response = getattr(exc, "response", None)
+        headers = getattr(error_response, "headers", None)
+        if headers is not None:
+            retry_after = LLMProvider.retry_after_from_headers(headers)
+    response.error_retry_after_s = retry_after
+    if response.error_status_code == 429:
+        response.error_kind = "rate_limit"
+    return response

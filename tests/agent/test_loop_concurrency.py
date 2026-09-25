@@ -28,6 +28,29 @@ def test_request_concurrency_is_unlimited_by_default(
     assert loop._concurrency_gate is None
 
 
+def test_scheduler_default_and_legacy_turn_gate_keep_their_existing_parity(
+    monkeypatch: pytest.MonkeyPatch,
+    loop_factory,
+) -> None:
+    from nanobot.config.schema import Config
+    from nanobot.orchestration.scheduler import ProviderLane
+    from nanobot.providers.factory import _scheduler_for_config
+
+    monkeypatch.delenv("NANOBOT_MAX_CONCURRENT_REQUESTS", raising=False)
+    default_scheduler = _scheduler_for_config(Config())
+    assert default_scheduler.limit_for(ProviderLane("provider", "model")) is None
+    assert loop_factory(provider=_provider(), patch_deps=True)._concurrency_gate is None
+
+    monkeypatch.setenv("NANOBOT_MAX_CONCURRENT_REQUESTS", "2")
+    legacy_config = Config()
+    mapped_scheduler = _scheduler_for_config(legacy_config)
+    loop = loop_factory(provider=_provider(), patch_deps=True)
+
+    assert mapped_scheduler.limit_for(ProviderLane("provider", "model")) == 2
+    assert loop._concurrency_gate is not None
+    assert loop._concurrency_gate._value == 2
+
+
 @pytest.mark.asyncio
 async def test_positive_request_concurrency_keeps_explicit_cap(
     monkeypatch: pytest.MonkeyPatch,

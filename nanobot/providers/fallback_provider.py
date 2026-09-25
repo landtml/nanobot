@@ -15,9 +15,11 @@ from loguru import logger
 from nanobot.events import RetryStatusEvent
 from nanobot.orchestration.scheduler import (
     LaneSaturatedError,
+    ProviderLane,
     ScheduledProvider,
     Scheduler,
     fallback_candidate_admission,
+    reserved_lane_lease,
 )
 from nanobot.providers.base import (
     GenerationSettings,
@@ -484,6 +486,7 @@ class FallbackProvider(LLMProvider):
         has_streamed: list[bool] | None,
         on_stream_recover: Callable[[], Awaitable[None]] | None = None,
         on_fallback_attempt: Callable[[], Awaitable[None]] | None = None,
+        only_lane: ProviderLane | None = None,
     ) -> LLMResponse:
         primary_model = kwargs.get("model") or self._primary.get_default_model()
         primary_was_attempted = False
@@ -495,7 +498,14 @@ class FallbackProvider(LLMProvider):
         saturated: list[LaneSaturatedError] = []
         primary_locally_saturated = False
 
-        if self._primary_available():
+        primary_lane = (
+            self._primary.lane_for(kwargs.get("model") or primary_model)
+            if isinstance(self._primary, ScheduledProvider)
+            else None
+        )
+        if self._primary_available() and (
+            only_lane is None or primary_lane == only_lane
+        ):
             try:
                 primary_was_attempted = True
                 response, primary_exception = await self._call_provider(
@@ -606,6 +616,13 @@ class FallbackProvider(LLMProvider):
                     "Failed to create provider for fallback '{}': {}", fallback_model, exc
                 )
                 continue
+            fallback_lane = (
+                fallback_provider.lane_for(fallback_model)
+                if isinstance(fallback_provider, ScheduledProvider)
+                else None
+            )
+            if only_lane is not None and fallback_lane != only_lane:
+                continue
 
             fallback_kwargs = {
                 **kwargs,
@@ -686,20 +703,20 @@ class FallbackProvider(LLMProvider):
 
         if saturated:
             # Local saturation did not invoke a provider, so it must not become
-            # a fallback failure. Queue fairly on a candidate lane, release the
-            # reservation, then restart selection; cancellation removes the
-            # queued admission in Scheduler.acquire.
+            # a fallback failure. Carry the fair queue's lease directly into
+            # the matching candidate call to avoid releasing/restarting selection.
             lease = await saturated[0].scheduler.acquire_any(
                 [candidate.lane for candidate in saturated]
             )
-            await lease.release()
-            return await self._try_with_fallback(
-                call,
-                kwargs,
-                has_streamed=has_streamed,
-                on_stream_recover=on_stream_recover,
-                on_fallback_attempt=on_fallback_attempt,
-            )
+            with reserved_lane_lease(lease):
+                return await self._try_with_fallback(
+                    call,
+                    kwargs,
+                    has_streamed=has_streamed,
+                    on_stream_recover=on_stream_recover,
+                    on_fallback_attempt=on_fallback_attempt,
+                    only_lane=lease.lane,
+                )
         logger.warning(
             "All {} fallback model(s) failed",
             len(self._fallback_presets),

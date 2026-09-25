@@ -633,6 +633,10 @@ class GenerationSettings:
 _SYNTHETIC_USER_CONTENT = "(conversation continued)"
 
 
+class ProviderAdmissionError(Exception):
+    """Internal control flow raised before provider I/O can be admitted."""
+
+
 class LLMProvider(ABC):
     """Base class for LLM providers."""
 
@@ -1020,6 +1024,11 @@ class LLMProvider(ABC):
             error_should_retry=error_should_retry,
         )
 
+    @staticmethod
+    def error_response_from_exception(exc: Exception) -> LLMResponse:
+        """Build a structured response when a provider exception escapes its call."""
+        return LLMProvider._error_response_from_exception(exc)
+
     @classmethod
     def _is_transient_error(cls, content: str | None) -> bool:
         err = (content or "").lower()
@@ -1301,6 +1310,8 @@ class LLMProvider(ABC):
                 stream=False,
             )
             raise
+        except ProviderAdmissionError:
+            raise
         except Exception as exc:
             response = self._error_response_from_exception(exc)
         return self._observe_llm_call(
@@ -1445,6 +1456,8 @@ class LLMProvider(ABC):
                 started_at_ns=started_at_ns,
                 stream=True,
             )
+            raise
+        except ProviderAdmissionError:
             raise
         except Exception as exc:
             response = self._error_response_from_exception(exc)
@@ -1732,6 +1745,11 @@ class LLMProvider(ABC):
             retry_at = retry_at.replace(tzinfo=timezone.utc)
         remaining = (retry_at - datetime.now(retry_at.tzinfo)).total_seconds()
         return max(0.1, remaining)
+
+    @classmethod
+    def retry_after_from_headers(cls, headers: Any) -> float | None:
+        """Extract a retry delay for provider wrappers that observe exceptions."""
+        return cls._extract_retry_after_from_headers(headers)
 
     @classmethod
     def _extract_retry_after_from_response(cls, response: LLMResponse) -> float | None:
