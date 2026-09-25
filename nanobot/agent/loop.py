@@ -8,9 +8,11 @@ import asyncio
 import dataclasses
 import os
 import time
+import uuid
 import weakref
 from collections.abc import Coroutine, Iterable, Mapping
 from contextlib import AbstractContextManager, ExitStack, nullcontext, suppress
+from contextvars import Token
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
@@ -54,6 +56,12 @@ from nanobot.config.schema import AgentDefaults, ModelPresetConfig
 from nanobot.events import NO_EVENTS, AgentEvent, EventSink
 from nanobot.llm_usage.context import source_from_request
 from nanobot.orchestration.executor import RunExecutor
+from nanobot.orchestration.supervisor import (
+    RunRegistry,
+    bind_current_run,
+    current_run_id,
+    reset_current_run,
+)
 from nanobot.orchestration.types import Budget, Capabilities, RunSpec
 from nanobot.providers.base import LLMProvider, LLMUsage, ProviderConversationState
 from nanobot.providers.factory import ProviderSnapshot
@@ -411,6 +419,7 @@ class AgentLoop:
         self.tools = tool_registry if tool_registry is not None else ToolRegistry()
         self._exec_session_manager = ExecSessionManager()
         self.runner = AgentRunner()
+        self.run_registry = RunRegistry(bus.publish)
         # Channel and project of a session when no inbound message is at hand.
         self._prompt_context = PersistedPromptContextResolver(
             workspace_scopes=self.workspace_scopes,
@@ -426,6 +435,7 @@ class AgentLoop:
             max_iterations=self.max_iterations,
             max_concurrent_subagents=max_concurrent_subagents,
             memory=self.memory,
+            supervisor=self.run_registry,
         )
         self._unified_session = unified_session
         self._running = False
@@ -864,6 +874,20 @@ class AgentLoop:
         tasks.add(task)
         task.add_done_callback(partial(self._active_task_done, key, tasks))
 
+    async def _begin_run_turn(self, session_key: str) -> tuple[str, Token[str | None]]:
+        run_registry = getattr(self, "run_registry", None)
+        if not isinstance(run_registry, RunRegistry):
+            run_registry = self.run_registry = RunRegistry()
+        root = await run_registry.ensure_session_root(session_key)
+        turn_id = f"turn-{uuid.uuid4()}"
+        run_registry.register(
+            turn_id,
+            parent_id=root.id,
+            root_id=root.id,
+        )
+        await run_registry.start(turn_id)
+        return turn_id, bind_current_run(turn_id)
+
     def _active_task_done(
         self,
         key: str,
@@ -892,6 +916,12 @@ class AgentLoop:
             if journal_session is not None
             else ()
         )
+        root_id = self.run_registry.session_root_id(key)
+        tree_cancelled = (
+            await self.run_registry.cancel_session(root_id)
+            if root_id is not None
+            else 0
+        )
         pending = self._pending_queues.get(key)
         tasks = tuple(self._active_tasks.pop(key, set()))
         cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
@@ -912,7 +942,7 @@ class AgentLoop:
             self.sessions.save(current_session)
         sub_cancelled = await self.subagents.cancel_by_session(key)
         exec_cancelled = await self._exec_session_manager.terminate_by_owner(key)
-        return cancelled + sub_cancelled + exec_cancelled
+        return cancelled + tree_cancelled + sub_cancelled + exec_cancelled
 
     async def discard_session(self, key: str) -> None:
         """Stop active work for *key* and forget its cached session."""
@@ -1278,6 +1308,9 @@ class AgentLoop:
                 caps=Capabilities(tools=frozenset(effective_tools.tool_names)),
                 context="fork",
                 durable=not ephemeral,
+                id=(run_id := current_run_id()),
+                root=(self.run_registry.get(run_id).root_id if run_id is not None else None),
+                parent=(self.run_registry.get(run_id).parent_id if run_id is not None else None),
             ))
         finally:
             turn_scope_stack.close()
@@ -1470,7 +1503,19 @@ class AgentLoop:
                     session.policy.persist and session.policy.log_content
                 )
                 try:
-                    await self._dispatch_one(msg, pending)
+                    turn_id, run_token = await self._begin_run_turn(session_key)
+                    try:
+                        await self._dispatch_one(msg, pending)
+                    except asyncio.CancelledError:
+                        await self.run_registry.finish_cancelled(turn_id)
+                        raise
+                    except Exception:
+                        await self.run_registry.finish(turn_id, "failed")
+                        raise
+                    else:
+                        await self.run_registry.finish(turn_id, "completed")
+                    finally:
+                        reset_current_run(run_token)
                 except asyncio.CancelledError as exc:
                     for coordinator in self._automation_turn_coordinators:
                         coordinator.complete(msg, error=exc)
@@ -1647,6 +1692,12 @@ class AgentLoop:
 
     async def _aclose_unlocked(self) -> None:
         errors: list[BaseException] = []
+        run_registry = getattr(self, "run_registry", None)
+        if isinstance(run_registry, RunRegistry):
+            try:
+                await run_registry.cancel_all()
+            except BaseException as exc:
+                errors.append(exc)
         active_task_groups = getattr(self, "_active_tasks", {})
         current_task = asyncio.current_task()
         pending_queues = {
@@ -2532,10 +2583,20 @@ class AgentLoop:
                     kwargs["on_runtime_admitted"] = on_runtime_admitted
                 if attributes is not None:
                     kwargs["attributes"] = dict(attributes)
-                return await self._process_message(
-                    msg,
-                    **kwargs,
-                )
+                turn_id, run_token = await self._begin_run_turn(session_key)
+                try:
+                    response = await self._process_message(msg, **kwargs)
+                except asyncio.CancelledError:
+                    await self.run_registry.finish_cancelled(turn_id)
+                    raise
+                except Exception:
+                    await self.run_registry.finish(turn_id, "failed")
+                    raise
+                else:
+                    await self.run_registry.finish(turn_id, "completed")
+                    return response
+                finally:
+                    reset_current_run(run_token)
         finally:
             await self.runtime_event_publisher.run_status_changed(msg, session_key, "idle")
             self.runtime_event_publisher.clear_turn(session_key)

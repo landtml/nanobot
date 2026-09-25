@@ -35,6 +35,12 @@ from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import AgentDefaults, ToolsConfig
 from nanobot.llm_usage.context import LLMUsageSource, current_llm_usage_source
 from nanobot.orchestration.executor import RunExecutor
+from nanobot.orchestration.supervisor import (
+    RunRegistry,
+    bind_current_run,
+    current_run_id,
+    reset_current_run,
+)
 from nanobot.orchestration.types import Budget, Capabilities, RunMessage, RunSpec
 from nanobot.providers.base import LLMProvider, LLMUsage
 from nanobot.security.workspace_access import (
@@ -121,6 +127,7 @@ class SubagentManager:
         max_iterations: int | None = None,
         max_concurrent_subagents: int | None = None,
         memory: Memory | None = None,
+        supervisor: RunRegistry | None = None,
     ):
         if workspace is None:
             raise TypeError("SubagentManager.__init__() missing required argument: 'workspace'")
@@ -164,6 +171,7 @@ class SubagentManager:
             else defaults.max_concurrent_subagents
         )
         self.memory = memory
+        self.supervisor = supervisor or RunRegistry(bus.publish)
         self._run_slots = asyncio.Semaphore(self.max_concurrent_subagents)
         self.runner = AgentRunner()
         self._exec_session_manager = ExecSessionManager()
@@ -173,7 +181,40 @@ class SubagentManager:
 
     def runtime_statuses(self) -> Mapping[str, SubagentStatus]:
         """Return the observable task statuses used by runtime-control snapshots."""
-        return self._task_statuses
+        return {
+            task_id: status
+            for task_id, status in self.supervisor.legacy_statuses().items()
+            if isinstance(status, SubagentStatus)
+        }
+
+    async def _ensure_registered_run(
+        self,
+        task_id: str,
+        session_key: str | None,
+        status: SubagentStatus,
+    ) -> None:
+        if self.supervisor.contains(task_id):
+            return
+        active_run_id = current_run_id()
+        if active_run_id is None:
+            parent = await self.supervisor.ensure_session_root(
+                session_key or f"subagent:{task_id}"
+            )
+            parent_id = root_id = parent.id
+        else:
+            parent_id = active_run_id
+            root_id = self.supervisor.get(active_run_id).root_id
+        self.supervisor.register(
+            task_id,
+            parent_id=parent_id,
+            root_id=root_id,
+            lifetime="scoped",
+            legacy_status=status,
+        )
+        await self.supervisor.start(task_id)
+        task = asyncio.current_task()
+        if task is not None:
+            self.supervisor.attach_task(task_id, task)
 
     def set_provider(self, provider: LLMProvider, model: str) -> None:
         """Update the deprecated runtime source used by legacy ``spawn`` calls."""
@@ -279,6 +320,23 @@ class SubagentManager:
         )
         self._task_statuses[task_id] = status
 
+        active_run_id = current_run_id()
+        if active_run_id is None:
+            parent = await self.supervisor.ensure_session_root(
+                session_key or f"{origin_channel}:{origin_chat_id}"
+            )
+            root_id = parent.id
+        else:
+            root_id = self.supervisor.get(active_run_id).root_id
+        self.supervisor.register(
+            task_id,
+            parent_id=root_id,
+            root_id=root_id,
+            lifetime="detached",
+            legacy_status=status,
+        )
+        await self.supervisor.start(task_id)
+
         bg_task = asyncio.create_task(
             self._run_subagent(
                 task_id,
@@ -292,6 +350,7 @@ class SubagentManager:
             )
         )
         self._running_tasks[task_id] = bg_task
+        self.supervisor.attach_task(task_id, bg_task)
         if session_key:
             self._session_tasks.setdefault(session_key, set()).add(task_id)
 
@@ -345,6 +404,21 @@ class SubagentManager:
             started_at=time.monotonic(),
         )
         self._task_statuses[task_id] = status
+        parent_id = current_run_id()
+        if parent_id is None:
+            parent = await self.supervisor.ensure_session_root(
+                session_key or f"{origin_channel}:{origin_chat_id}"
+            )
+            parent_id = parent.id
+        root_id = self.supervisor.get(parent_id).root_id
+        self.supervisor.register(
+            task_id,
+            parent_id=parent_id,
+            root_id=root_id,
+            lifetime="scoped",
+            legacy_status=status,
+        )
+        await self.supervisor.start(task_id)
         if origin["log_content"]:
             logger.info("Running inline subagent [{}]: {}", task_id, display_label)
         inline_task = asyncio.create_task(
@@ -361,6 +435,7 @@ class SubagentManager:
             )
         )
         self._running_tasks[task_id] = inline_task
+        self.supervisor.attach_task(task_id, inline_task)
         if session_key:
             self._session_tasks.setdefault(session_key, set()).add(task_id)
         try:
@@ -390,20 +465,36 @@ class SubagentManager:
         announce: bool = True,
     ) -> str:
         """Wait for capacity, then execute one subagent task."""
+        await self._ensure_registered_run(task_id, origin.get("session_key"), status)
+        run_token = bind_current_run(task_id)
         status.phase = "queued"
-        async with self._run_slots:
-            status.phase = "initializing"
-            return await self._run_admitted_subagent(
+        try:
+            async with self._run_slots:
+                status.phase = "initializing"
+                result = await self._run_admitted_subagent(
+                    task_id,
+                    task,
+                    label,
+                    origin,
+                    status,
+                    runtime,
+                    origin_message_id,
+                    workspace_scope,
+                    announce=announce,
+                )
+        except asyncio.CancelledError:
+            status.phase = "done"
+            status.stop_reason = "cancelled"
+            await self.supervisor.finish_cancelled(task_id)
+            raise
+        else:
+            await self.supervisor.finish(
                 task_id,
-                task,
-                label,
-                origin,
-                status,
-                runtime,
-                origin_message_id,
-                workspace_scope,
-                announce=announce,
+                "failed" if status.stop_reason == "error" else "completed",
             )
+            return result
+        finally:
+            reset_current_run(run_token)
 
     async def _run_admitted_subagent(
         self,
@@ -419,6 +510,7 @@ class SubagentManager:
         announce: bool = True,
     ) -> str:
         """Execute the subagent task and announce the result."""
+        await self._ensure_registered_run(task_id, origin.get("session_key"), status)
         if origin.get("log_content", True):
             logger.info("Subagent [{}] starting task: {}", task_id, label)
 
@@ -492,6 +584,9 @@ class SubagentManager:
                     caps=Capabilities(tools=frozenset(tools.tool_names)),
                     context="fresh",
                     durable=origin.get("session_persist", True),
+                    id=task_id,
+                    root=self.supervisor.get(task_id).root_id,
+                    parent=self.supervisor.get(task_id).parent_id,
                 ))
             finally:
                 if token is not None:
@@ -523,6 +618,7 @@ class SubagentManager:
 
         except Exception as e:
             status.phase = "error"
+            status.stop_reason = "error"
             status.error = str(e)
             if origin.get("log_content", True):
                 logger.exception("Subagent [{}] failed", task_id)

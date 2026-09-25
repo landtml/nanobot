@@ -8,6 +8,7 @@ This module adds a deterministic three-child turn and /stop latency baseline.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
@@ -143,12 +144,27 @@ async def test_stop_cancels_a_child_and_records_latency(
 
     loop.subagents.runner.run = blocked_run
     try:
+        if os.name == "nt":
+            pytest.skip("managed exec process fixture uses the POSIX sleep command")
         await loop.subagents.spawn(
             "blocked child",
             runtime=runtime,
             session_key="cli:direct",
         )
+        generation_id = loop.run_registry.session_root_id("cli:direct")
+        assert generation_id is not None
         await asyncio.wait_for(child_started.wait(), timeout=1.0)
+        await loop.subagents._exec_session_manager.start(
+            command="sleep 30",
+            cwd=str(tmp_path),
+            env={},
+            timeout=None,
+            shell_program=None,
+            login=False,
+            yield_time_ms=0,
+            max_output_chars=100,
+            owner_session_key="cli:direct",
+        )
         started = perf_counter()
         message = InboundMessage(
             channel="cli",
@@ -171,6 +187,11 @@ async def test_stop_cancels_a_child_and_records_latency(
     record_property("p00_stop_cancel_latency_seconds", elapsed)
     assert stopped is not None and "stopped 1 task" in stopped.content.lower()
     assert child_cancelled.is_set()
+    assert loop.run_registry.live_tasks() == ()
+    assert loop.subagents._exec_session_manager._sessions == {}
+    assert loop.run_registry.session_root_id("cli:direct") is None
+    next_generation = await loop.run_registry.ensure_session_root("cli:direct")
+    assert next_generation.id != generation_id
     assert elapsed < 1.0
     print(f"P00 baseline: /stop cancelled a child in {elapsed * 1000:.1f} ms")
 

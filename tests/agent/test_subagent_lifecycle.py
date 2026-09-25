@@ -379,6 +379,7 @@ class TestRunSubagent:
             )
             assert status.phase == "error"
             assert "LLM down" in status.error
+            assert sm.supervisor.get("t1").state == "failed"
             assert mock_announce.call_args.args[-2] == "error"
 
     @pytest.mark.asyncio
