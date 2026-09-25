@@ -139,7 +139,7 @@ phases:
 
   - id: P03
     title: Scheduler
-    status: todo
+    status: in_review
     depends_on: [P01]
     goal: One admission point per model call with priority classes, provider lanes, fair queuing (§2.5).
     create:

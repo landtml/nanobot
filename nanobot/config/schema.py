@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
     from nanobot.agent.tools.web import WebToolsConfig
+    from nanobot.orchestration.scheduler import Scheduler
 
 
 class ChannelsConfig(Base):
@@ -47,6 +48,45 @@ class TranscriptionConfig(Base):
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}$")
     max_duration_sec: int = Field(default=120, ge=1, le=600)
     max_upload_mb: int = Field(default=25, ge=1, le=100)
+
+
+class SchedulerConfig(Base):
+    """Per-model-call scheduler limits; zero keeps admission uncapped."""
+
+    max_concurrent_requests: int = Field(
+        default=0,
+        ge=0,
+        validation_alias=AliasChoices("maxConcurrentRequests", "max_concurrent_requests"),
+        serialization_alias="maxConcurrentRequests",
+    )
+    lane_limits: dict[str, int] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("laneLimits", "lane_limits"),
+        serialization_alias="laneLimits",
+    )
+    minimum_concurrency: int = Field(
+        default=1,
+        ge=1,
+        validation_alias=AliasChoices("minimumConcurrency", "minimum_concurrency"),
+        serialization_alias="minimumConcurrency",
+    )
+    maximum_concurrency: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices("maximumConcurrency", "maximum_concurrency"),
+        serialization_alias="maximumConcurrency",
+    )
+
+    @field_validator("lane_limits")
+    @classmethod
+    def _validate_lane_limits(cls, limits: dict[str, int]) -> dict[str, int]:
+        if any(not lane.strip() or limit < 1 for lane, limit in limits.items()):
+            raise ValueError("lane_limits keys must be non-empty and limits positive")
+        return limits
+
+
+class OrchestrationConfig(Base):
+    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
 
 
 class MemoryConfig(Base):
@@ -424,11 +464,13 @@ class Config(BaseSettings):
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    orchestration: "OrchestrationConfig" = Field(default_factory=lambda: OrchestrationConfig())
     model_presets: dict[str, ModelPresetConfig] = Field(
         default_factory=dict,
         validation_alias=AliasChoices("modelPresets", "model_presets"),
         serialization_alias="modelPresets",
     )
+    _scheduler: Scheduler | None = PrivateAttr(default=None)
 
     def __init__(self, **values: Any) -> None:
         if not type(self).__pydantic_complete__:
@@ -438,6 +480,13 @@ class Config(BaseSettings):
     def bind_source_path(self, path: Path) -> None:
         """Record the config file that owns instance-level runtime data."""
         self._source_path = path.expanduser().resolve(strict=False)
+
+    @property
+    def scheduler_instance(self) -> "Scheduler | None":
+        return self._scheduler
+
+    def set_scheduler_instance(self, scheduler: "Scheduler") -> None:
+        self._scheduler = scheduler
 
     @property
     def runtime_data_dir(self) -> Path | None:

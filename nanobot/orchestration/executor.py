@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from nanobot.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec, InjectionCallback
+from nanobot.orchestration.scheduler import scheduler_context
 from nanobot.orchestration.types import RunMessage, RunnerDefaultErrorMessage, RunSpec
 
 
@@ -57,4 +58,8 @@ class RunExecutor:
 
     @staticmethod
     async def run(runner: AgentRunner, spec: RunSpec) -> AgentRunResult:
-        return await runner.run(RunExecutor.build_agent_run_spec(spec))
+        root = spec.root or spec.session_key
+        if root is None and spec.workspace is not None:
+            root = f"workspace:{spec.workspace.expanduser().resolve(strict=False)}"
+        with scheduler_context(root=root, priority=spec.priority):
+            return await runner.run(RunExecutor.build_agent_run_spec(spec))
