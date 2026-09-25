@@ -5,7 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from nanobot.config.schema import Config, InlineFallbackConfig, ModelPresetConfig, ProviderConfig
+from nanobot.config.schema import (
+    Config,
+    InlineFallbackConfig,
+    ModelPresetConfig,
+    ProviderConfig,
+)
+from nanobot.orchestration.scheduler import ScheduledProvider, Scheduler
 from nanobot.providers.base import GenerationSettings, LLMProvider
 from nanobot.providers.fallback_provider import FallbackProvider
 from nanobot.providers.registry import ProviderSpec, create_dynamic_spec, find_by_name
@@ -276,21 +282,30 @@ def make_provider(
     preset_name: str | None = None,
     preset: ModelPresetConfig | None = None,
     model: str | None = None,
+    scheduled: bool = False,
 ) -> LLMProvider:
     """Create the LLM provider implied by config.
 
     When *model* is given, it overrides the resolved/preset model — used by
-    the failover path to create providers for fallback models.
+    the failover path to create providers for fallback models. Application
+    composition roots set *scheduled* to install shared admission.
     """
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
+    scheduler = _scheduler_for_config(config) if scheduled else None
     provider = _make_provider_core(config, preset=resolved, model=model)
+    if scheduler is not None:
+        provider = ScheduledProvider(provider, scheduler)
     fallback_presets = _resolve_fallback_presets(config, resolved)
 
     if fallback_presets:
         provider = FallbackProvider(
             primary=provider,
             fallback_presets=fallback_presets,
-            provider_factory=lambda fb: _make_provider_core(config, preset=fb),
+            provider_factory=lambda fb: (
+                ScheduledProvider(_make_provider_core(config, preset=fb), scheduler)
+                if scheduler is not None
+                else _make_provider_core(config, preset=fb)
+            ),
             primary_context_window_tokens=resolved.context_window_tokens,
             fallback_preset_names=[
                 fallback if isinstance(fallback, str) else None
@@ -299,6 +314,48 @@ def make_provider(
         )
 
     return provider
+
+
+def scheduler_limit_from_settings(
+    configured_limit: int,
+    *,
+    environment_limit: int | None = None,
+) -> int | None:
+    """Map the legacy request limit onto each lane's default ceiling."""
+    limit = environment_limit if environment_limit is not None else configured_limit
+    return limit if limit > 0 else None
+
+
+def schedule_provider(config: Config, provider: LLMProvider) -> LLMProvider:
+    """Attach the config-owned scheduler at an application composition root."""
+    if isinstance(provider, ScheduledProvider):
+        return provider
+    scheduler = _scheduler_for_config(config)
+    if isinstance(provider, FallbackProvider):
+        provider.set_scheduler(scheduler)
+        return provider
+    return ScheduledProvider(provider, scheduler)
+
+
+def _scheduler_for_config(config: Config) -> Scheduler:
+    scheduler = config.scheduler_instance
+    if scheduler is None:
+        import os
+
+        raw_environment_limit = os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS")
+        environment_limit = int(raw_environment_limit) if raw_environment_limit else None
+        settings = config.orchestration.scheduler
+        scheduler = Scheduler(
+            default_limit=scheduler_limit_from_settings(
+                settings.max_concurrent_requests,
+                environment_limit=environment_limit,
+            ),
+            lane_limits=settings.lane_limits,
+            minimum_limit=settings.minimum_concurrency,
+            maximum_limit=settings.maximum_concurrency,
+        )
+        config.set_scheduler_instance(scheduler)
+    return scheduler
 
 
 def build_unconfigured_provider_snapshot(config: Config, setup_error: str) -> ProviderSnapshot:
@@ -395,7 +452,7 @@ def build_provider_snapshot(
         for fallback in _resolve_fallback_presets(config, resolved)
     ]
     return ProviderSnapshot(
-        provider=make_provider(config, preset=resolved),
+        provider=make_provider(config, preset=resolved, scheduled=True),
         model=resolved.model,
         context_window_tokens=min([resolved.context_window_tokens, *fallback_windows]),
         signature=provider_signature(config, preset=resolved),

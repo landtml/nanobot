@@ -18,6 +18,7 @@ from nanobot.agent.runner import CheckpointCallback, ContinuationCallback, Injec
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.events import NO_EVENTS, EventSink
 from nanobot.llm_usage.context import LLMUsageSource
+from nanobot.orchestration.scheduler import Priority
 from nanobot.providers.base import ProviderConversationState
 from nanobot.utils.llm_runtime import LLMRuntime
 
@@ -90,3 +91,4 @@ class RunSpec:
     isolation: Literal["shared", "worktree"] = "shared"
     durable: bool = True
     lifetime: Literal["scoped", "detached"] = "scoped"
+    priority: Priority = "interactive"

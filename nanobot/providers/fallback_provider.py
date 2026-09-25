@@ -13,6 +13,14 @@ from typing import Any
 from loguru import logger
 
 from nanobot.events import RetryStatusEvent
+from nanobot.orchestration.scheduler import (
+    LaneSaturatedError,
+    ProviderLane,
+    ScheduledProvider,
+    Scheduler,
+    fallback_candidate_admission,
+    reserved_lane_lease,
+)
 from nanobot.providers.base import (
     GenerationSettings,
     LLMCallObserver,
@@ -177,6 +185,22 @@ class FallbackProvider(LLMProvider):
         """Attach usage recording to the primary and future fallback leaves."""
         super().set_llm_call_observer(observer)
         self._primary.set_llm_call_observer(observer)
+
+    def set_scheduler(self, scheduler: Scheduler) -> None:
+        """Schedule the primary and future lazily constructed fallback leaves."""
+        if not isinstance(self._primary, ScheduledProvider):
+            self._primary = ScheduledProvider(self._primary, scheduler)
+        provider_factory = self._provider_factory
+
+        def scheduled_factory(preset: Any) -> LLMProvider:
+            provider = provider_factory(preset)
+            return (
+                provider
+                if isinstance(provider, ScheduledProvider)
+                else ScheduledProvider(provider, scheduler)
+            )
+
+        self._provider_factory = scheduled_factory
 
     def can_resume_conversation_state(
         self,
@@ -462,6 +486,7 @@ class FallbackProvider(LLMProvider):
         has_streamed: list[bool] | None,
         on_stream_recover: Callable[[], Awaitable[None]] | None = None,
         on_fallback_attempt: Callable[[], Awaitable[None]] | None = None,
+        only_lane: ProviderLane | None = None,
     ) -> LLMResponse:
         primary_model = kwargs.get("model") or self._primary.get_default_model()
         primary_was_attempted = False
@@ -470,25 +495,42 @@ class FallbackProvider(LLMProvider):
         # A primary error eligible for failover did not return a replacement
         # continuation, so the incoming primary state remains reusable.
         preserve_primary_state = True
+        saturated: list[LaneSaturatedError] = []
+        primary_locally_saturated = False
 
-        if self._primary_available():
-            primary_was_attempted = True
-            response, primary_exception = await self._call_provider(
-                call, self._primary, kwargs
-            )
-            if primary_exception is not None:
-                logger.warning(
-                    "Primary model '{}' raised {} before responding",
-                    primary_model, type(primary_exception).__name__,
+        primary_lane = (
+            self._primary.lane_for(kwargs.get("model") or primary_model)
+            if isinstance(self._primary, ScheduledProvider)
+            else None
+        )
+        if self._primary_available() and (
+            only_lane is None or primary_lane == only_lane
+        ):
+            try:
+                primary_was_attempted = True
+                response, primary_exception = await self._call_provider(
+                    call, self._primary, kwargs
                 )
-            if response.finish_reason != "error":
-                self._primary_failures = 0
-                self._primary_tripped_at = None
-                return response
-            primary_response = response
-            primary_error = (response.content or primary_error)[:120]
+            except LaneSaturatedError as busy:
+                primary_was_attempted = False
+                primary_locally_saturated = True
+                saturated.append(busy)
+                response = None
+                primary_exception = None
+            if response is not None:
+                if response.finish_reason != "error":
+                    self._primary_failures = 0
+                    self._primary_tripped_at = None
+                    return response
+                if primary_exception is not None:
+                    logger.warning(
+                        "Primary model '{}' raised {} before responding",
+                        primary_model, type(primary_exception).__name__,
+                    )
+                primary_response = response
+                primary_error = (response.content or primary_error)[:120]
 
-            if has_streamed is not None and has_streamed[0]:
+            if response is not None and has_streamed is not None and has_streamed[0]:
                 is_timeout = (response.error_kind or "").lower() == "timeout"
                 if is_timeout:
                     logger.warning(
@@ -507,7 +549,7 @@ class FallbackProvider(LLMProvider):
                     )
                     return response
 
-            if not self._should_fallback(response):
+            if response is not None and not self._should_fallback(response):
                 logger.warning(
                     "Primary model '{}' failed with non-fallbackable error: {}",
                     primary_model,
@@ -515,13 +557,14 @@ class FallbackProvider(LLMProvider):
                 )
                 return response
 
-            self._primary_failures += 1
-            if self._primary_failures >= _PRIMARY_FAILURE_THRESHOLD:
-                self._primary_tripped_at = time.monotonic()
-                logger.warning(
-                    "Primary model '{}' circuit open after {} consecutive failures",
-                    primary_model, self._primary_failures,
-                )
+            if response is not None:
+                self._primary_failures += 1
+                if self._primary_failures >= _PRIMARY_FAILURE_THRESHOLD:
+                    self._primary_tripped_at = time.monotonic()
+                    logger.warning(
+                        "Primary model '{}' circuit open after {} consecutive failures",
+                        primary_model, self._primary_failures,
+                    )
         else:
             logger.debug("Primary model '{}' circuit open; skipping", primary_model)
 
@@ -545,10 +588,16 @@ class FallbackProvider(LLMProvider):
                 else:
                     break
             if idx == 0 and primary_skipped:
-                logger.info(
-                    "Primary model '{}' circuit open, trying fallback '{}'",
-                    primary_model, fallback_model,
-                )
+                if primary_locally_saturated:
+                    logger.info(
+                        "Primary model '{}' lane is busy, trying fallback '{}'",
+                        primary_model, fallback_model,
+                    )
+                else:
+                    logger.info(
+                        "Primary model '{}' circuit open, trying fallback '{}'",
+                        primary_model, fallback_model,
+                    )
             elif idx == 0:
                 logger.info(
                     "Primary model '{}' failed: {}; trying fallback '{}'",
@@ -559,8 +608,6 @@ class FallbackProvider(LLMProvider):
                     "Fallback '{}' also failed, trying next fallback '{}'",
                     self._fallback_presets[idx - 1].model, fallback_model,
                 )
-            if on_fallback_attempt is not None:
-                await on_fallback_attempt()
             try:
                 fallback_provider = self._provider_factory(fallback)
                 fallback_provider.set_llm_call_observer(self._llm_call_observer)
@@ -568,6 +615,13 @@ class FallbackProvider(LLMProvider):
                 logger.warning(
                     "Failed to create provider for fallback '{}': {}", fallback_model, exc
                 )
+                continue
+            fallback_lane = (
+                fallback_provider.lane_for(fallback_model)
+                if isinstance(fallback_provider, ScheduledProvider)
+                else None
+            )
+            if only_lane is not None and fallback_lane != only_lane:
                 continue
 
             fallback_kwargs = {
@@ -612,9 +666,16 @@ class FallbackProvider(LLMProvider):
                 fallback_kwargs.pop("reasoning_effort", None)
             else:
                 fallback_kwargs["reasoning_effort"] = fallback.reasoning_effort
-            fallback_response, fallback_exception = await self._call_provider(
-                call, fallback_provider, fallback_kwargs
-            )
+            try:
+                fallback_response, fallback_exception = await self._call_provider(
+                    call,
+                    fallback_provider,
+                    fallback_kwargs,
+                    on_admitted=on_fallback_attempt,
+                )
+            except LaneSaturatedError as busy:
+                saturated.append(busy)
+                continue
             if fallback_exception is not None:
                 logger.warning(
                     "Fallback '{}' raised {}",
@@ -640,6 +701,22 @@ class FallbackProvider(LLMProvider):
                 (fallback_response.content or "")[:120],
             )
 
+        if saturated:
+            # Local saturation did not invoke a provider, so it must not become
+            # a fallback failure. Carry the fair queue's lease directly into
+            # the matching candidate call to avoid releasing/restarting selection.
+            lease = await saturated[0].scheduler.acquire_any(
+                [candidate.lane for candidate in saturated]
+            )
+            with reserved_lane_lease(lease):
+                return await self._try_with_fallback(
+                    call,
+                    kwargs,
+                    has_streamed=has_streamed,
+                    on_stream_recover=on_stream_recover,
+                    on_fallback_attempt=on_fallback_attempt,
+                    only_lane=lease.lane,
+                )
         logger.warning(
             "All {} fallback model(s) failed",
             len(self._fallback_presets),
@@ -673,10 +750,25 @@ class FallbackProvider(LLMProvider):
         call: Callable[[LLMProvider, dict[str, Any]], Awaitable[LLMResponse]],
         provider: LLMProvider,
         kwargs: dict[str, Any],
+        *,
+        on_admitted: Callable[[], Awaitable[None]] | None = None,
     ) -> tuple[LLMResponse, Exception | None]:
         """Turn provider exceptions into error responses without swallowing cancellation."""
+        admitted = False
+
+        async def notify_admitted() -> None:
+            nonlocal admitted
+            if on_admitted is not None and not admitted:
+                admitted = True
+                await on_admitted()
+
         try:
-            return await call(provider, kwargs), None
+            if on_admitted is not None and not isinstance(provider, ScheduledProvider):
+                await notify_admitted()
+            with fallback_candidate_admission(notify_admitted):
+                return await call(provider, kwargs), None
+        except LaneSaturatedError:
+            raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -41,6 +41,7 @@ from nanobot.agent.observational_memory import tokens as om_tokens
 from nanobot.agent.observational_memory.store import Snapshot, StaleStateError
 from nanobot.agent.observational_memory.text import ObserverMessage
 from nanobot.llm_usage.context import llm_usage_source
+from nanobot.orchestration.scheduler import scheduler_context
 from nanobot.runtime_context import public_history_message
 from nanobot.session.history_visibility import HIDDEN_HISTORY_META
 from nanobot.session.keys import is_internal_session
@@ -245,16 +246,20 @@ class Memory:
     async def _complete(self, *, system: str, prompt: str, temperature: float) -> str:
         runtime = self._runtime()
         with llm_usage_source("memory"):
-            response = await runtime.provider.chat_stream_with_retry(
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
-                ],
-                model=runtime.model,
-                temperature=temperature,
-                max_tokens=runtime.generation.max_tokens,
-                reasoning_effort=runtime.generation.reasoning_effort,
-            )
+            with scheduler_context(
+                root=f"memory:{self.workspace.expanduser().resolve(strict=False)}",
+                priority="maintenance",
+            ):
+                response = await runtime.provider.chat_stream_with_retry(
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt},
+                    ],
+                    model=runtime.model,
+                    temperature=temperature,
+                    max_tokens=runtime.generation.max_tokens,
+                    reasoning_effort=runtime.generation.reasoning_effort,
+                )
         if response.finish_reason == "error":
             raise RuntimeError(f"memory model call failed: {(response.content or '')[:200]}")
         return strip_think(response.content or "")
