@@ -1,0 +1,334 @@
+# nanobot orchestration: execution plan
+# Target design: docs/design/orchestration/architecture.md (read it first; section refs below are "§n").
+# Audience: an autonomous coding agent working through GitHub PRs.
+# Rules marked MUST are hard constraints. Everything under `approach` is guidance: prefer it,
+# deviate when the code says otherwise, and record why in the PR description.
+
+version: 1
+status_legend: [todo, in_progress, in_review, done, blocked]
+
+repo:
+  name: landtml/nanobot
+  base_branch: main            # if the Observational Memory branch (claude/amazing-newton-ic9ala) is not merged yet, branch from it instead
+  branch_pattern: "orch/p{NN}-{slug}"   # one branch per PR
+  pr_title_pattern: "orch(p{NN}): {summary}"
+  pr_body_must_include: [phase id, what changed, invariants protected, tests added, deviations from plan]
+
+commands:
+  setup: "uv sync --all-extras --dev && uv run --no-sync python -m scripts.install_channel_dependencies --all-channels"
+  lint: "uv run --no-sync ruff check nanobot tests conftest.py"
+  types: "uv run --no-sync basedpyright"
+  test_fast: "uv run --no-sync python -m pytest tests/agent tests/orchestration -q -n auto --dist loadfile"
+  test_full: "uv run --no-sync python -m pytest -n auto --dist loadfile --ignore=tests/cli/test_commands.py"
+  test_cli_serial: "uv run --no-sync python -m pytest tests/cli/test_commands.py -q"
+  webui: "cd webui && bun run test && bun run build"   # only for phases touching webui/
+
+global_rules:
+  - MUST read AGENTS.md and .agent/design.md, .agent/security.md, .agent/gotchas.md before phase P00.
+  - MUST keep CI green on every PR (lint, types, full tests). Record failures that also fail on the base branch in the PR body; do not fix unrelated failures in the same PR.
+  - MUST keep every existing model-facing tool working until P13 (spawn, list_sessions, send_session_message) with identical parameters and result shapes.
+  - MUST NOT change persisted formats in place. New fields are additive; readers accept old records. Persisted subagent messages (injected_event=subagent_result, subagent_task_id) stay readable forever.
+  - MUST NOT modify nanobot/agent/runner.py or nanobot/agent/context_governance.py except where a phase lists them under `touch`. They are the critical path.
+  - MUST NOT change Observational Memory behaviour; tests/agent/observational_memory/test_golden.py must stay green untouched.
+  - MUST declare every new setting in nanobot/config/schema.py (camelCase aliases, defaults that preserve current behaviour until the phase that flips them).
+  - MUST type new internal boundaries concretely (dataclasses, TypedDict, Protocol); no Any for first-party services; no cast without a runtime check.
+  - MUST add tests next to the code they cover (tests/ mirrors nanobot/). New kernel tests live in tests/orchestration/.
+  - One behaviour change per PR. Refactors that move code without changing behaviour go in their own PR first.
+  - Prefer small PRs (target < 600 changed lines excluding tests). Split a phase into several PRs when needed; keep phase order.
+  - If a step is impossible as written, stop that step, open a draft PR or issue with the finding and a proposal, and continue with the next independent step.
+  - Update this file's phase `status` in the PR that completes the phase.
+
+definitions:
+  run: "Unit of work: session turn, subagent, cron job, goal continuation, memory cycle (§2.1)."
+  kernel: "nanobot/orchestration/ package (§8 size budget: < 3,000 lines, no new runtime deps)."
+  simulator: "Deterministic test harness: scripted provider + virtual clock + fault injection (§7)."
+  executor: "The single place that builds AgentRunSpec from a RunSpec."
+
+invariants:   # each becomes a simulator test in the phase that introduces it
+  I1_one_execution_path: "Only orchestration/executor.py constructs AgentRunSpec."
+  I2_no_orphans: "A scoped run never outlives its parent; cancelling a run cancels its subtree first."
+  I3_attenuation: "child.caps ⊆ parent.caps for tools, MCP servers, paths, network, memory, budget."
+  I4_exactly_once: "Every result is persisted before delivery and delivered at most once per run id."
+  I5_private_stays_private: "Runs under a non-durable session persist nothing and cannot read memory/observations.md."
+  I6_one_wakeup_per_group: "N results arriving while the parent is idle wake it once per group."
+  I7_budget: "No run exceeds its budget by more than one model round."
+  I8_prefix_stability: "Siblings of one profile produce byte-identical prompt prefixes up to the last cache breakpoint."
+
+phases:
+
+  - id: P00
+    title: Baseline, simulator, privacy fix
+    status: todo
+    depends_on: []
+    goal: Freeze today's behaviour in tests and build the simulator every later phase uses.
+    create:
+      - tests/orchestration/__init__.py
+      - tests/orchestration/sim.py            # ScriptedProvider, VirtualClock, faults: crash, rate_limit, timeout, slow_tool
+      - tests/orchestration/test_baseline_subagents.py
+    touch:
+      - nanobot/agent/tools/filesystem.py     # I5: drop extra_read_allowed_files for non-durable sessions
+    approach:
+      - Reuse tests/agent/runner_helpers.py and session_helpers.py; do not duplicate fakes.
+      - Characterize: spawn background and wait=true, result injection mid-turn vs idle parent, /stop cancels children, dedup by subagent_task_id, usage source attribution, session message rate limit and reply timeout.
+      - Record baseline metrics in the test output (parent model calls per N children, cancel latency) for later comparison.
+      - "Privacy fix: read the active session's policy (SessionPolicy.persist) at call time via request context; keep the allowance for durable sessions."
+    done_when:
+      - Baseline tests pass on the unchanged code.
+      - Simulator can run a parent turn with 3 children in < 1 s wall time.
+      - Test proves a private session's read_file of memory/observations.md is refused; durable sessions still read it.
+
+  - id: P01
+    title: Single executor
+    status: todo
+    depends_on: [P00]
+    goal: One code path builds AgentRunSpec for session turns and subagents (I1). Children gain concurrent tools and an injection mailbox.
+    create:
+      - nanobot/orchestration/__init__.py
+      - nanobot/orchestration/types.py        # RunSpec, Capabilities, Budget (fields from §2.1; unused fields may default)
+      - nanobot/orchestration/executor.py
+    touch:
+      - nanobot/agent/loop.py                 # _run_agent_loop delegates spec construction
+      - nanobot/agent/subagent.py             # _run_admitted_subagent delegates spec construction
+    approach:
+      - First PR moves construction without behaviour change; second PR enables concurrent_tools and injection_callback for children.
+      - Mailbox for children = asyncio.Queue drained by the existing injection_callback contract.
+    done_when:
+      - grep finds AgentRunSpec( only in orchestration/executor.py.
+      - Baseline tests unchanged and green; new test shows two concurrency-safe child tools run in parallel.
+    pitfalls:
+      - Session turns pass transcript_input/transcript_builder, children pass initial_messages; the executor must support both.
+      - Keep llm_usage_source propagation identical.
+
+  - id: P02
+    title: Run registry, tree, structured concurrency
+    status: todo
+    depends_on: [P01]
+    goal: Runs have ids, parents, roots, states; cancellation cascades (I2); status is public.
+    create:
+      - nanobot/orchestration/supervisor.py   # RunRegistry + lifecycle state machine (§2.1 states)
+      - tests/orchestration/test_tree.py
+    touch:
+      - nanobot/agent/subagent.py             # becomes a thin adapter over the supervisor
+      - nanobot/agent/tools/self.py           # read supervisor.snapshot() instead of _task_statuses
+      - nanobot/agent/tools/runtime_control.py
+      - nanobot/agent/loop.py                 # /stop cancels the session root run
+    approach:
+      - Session turn = root run (depth 0). Subagent = scoped child.
+      - Emit RunStarted/RunCompleted/RunCancelled as AgentEvents on the bus (additive).
+    done_when:
+      - I2 simulator test: stop at any point leaves zero running tasks and zero exec sessions.
+      - Tree stop < 1 s in simulator with 3 levels x 4 children.
+
+  - id: P03
+    title: Scheduler
+    status: todo
+    depends_on: [P01]
+    goal: One admission point per model call with priority classes, provider lanes, fair queuing (§2.5).
+    create:
+      - nanobot/orchestration/scheduler.py    # Scheduler + ScheduledProvider (wraps LLMProvider like FallbackProvider)
+      - tests/orchestration/test_scheduler.py
+    touch:
+      - nanobot/providers/factory.py or composition roots   # insert ScheduledProvider; decide the least invasive seam
+      - nanobot/config/schema.py              # orchestration.scheduler: lanes, limits
+      - nanobot/agent/loop.py                 # NANOBOT_MAX_CONCURRENT_REQUESTS maps onto scheduler limits (keep env var working)
+      - nanobot/agent/memory.py               # memory calls run at maintenance priority
+    approach:
+      - Priority is read from a contextvar set by the executor, defaulting to interactive.
+      - AIMD on rate_limit/overloaded error kinds already classified in providers/fallback_provider.py.
+    done_when:
+      - Fairness test: 10-way fan-out in chat A raises chat B p95 admission wait by < 20% in simulator.
+      - 429 storm test: concurrency backs off and recovers; no request dropped.
+      - Default config reproduces today's concurrency exactly.
+
+  - id: P04
+    title: Profiles, router, capabilities
+    status: todo
+    depends_on: [P02, P03]
+    goal: Markdown agent profiles, tiers and effort, capability intersection (I3), the `agent` tool.
+    create:
+      - nanobot/orchestration/profiles.py     # load nanobot/agents/*.md, plugin profiles, <workspace>/agents/*.md
+      - nanobot/orchestration/router.py       # tier -> preset, effort normalization table, clamp by budget
+      - nanobot/orchestration/policy.py       # capability intersection
+      - nanobot/agents/{main,general,explorer,researcher,coder,reviewer,planner}.md
+      - nanobot/agent/tools/agents.py         # agent(...) tool; spawn becomes an alias calling it with profile=general
+      - tests/orchestration/test_profiles.py
+      - tests/orchestration/test_policy.py    # property tests for I3
+    touch:
+      - nanobot/config/schema.py              # orchestration.tiers, defaultProfile, maxDepth, maxChildren, maxDescendants
+      - nanobot/agent/context.py              # one line per profile in the cached prompt prefix
+      - nanobot/agent/subagent.py             # tool set from policy, not ToolLoader(scope="subagent"); MCP tools by profile globs
+    approach:
+      - Reuse the skills front-matter parser if one exists; otherwise a minimal YAML front-matter loader.
+      - Router uses ModelRuntimeResolver.resolve_preset and LLMRuntime.with_generation_overrides; no new provider code.
+      - Unknown tier/preset -> clear tool error listing valid values.
+      - Defaults keep `general` on the parent's runtime so behaviour is unchanged unless a profile is chosen.
+    done_when:
+      - spawn(...) results are unchanged; agent(task, profile="explorer") runs on the configured fast tier with its tool list.
+      - I3 property tests pass. Children can use allowed MCP tools.
+
+  - id: P05
+    title: Results, join, batched delivery
+    status: todo
+    depends_on: [P04]
+    goal: Structured results, groups, join tool, one wake-up per group (I6), no forced user summaries.
+    create:
+      - nanobot/orchestration/mailbox.py      # typed messages; delivery batching
+      - tests/orchestration/test_join.py
+    touch:
+      - nanobot/agent/tools/agents.py         # join(...)
+      - nanobot/agent/subagent.py             # _announce_result -> mailbox delivery
+      - nanobot/templates/agent/subagent_announce.md   # replace instruction with structured result rendering
+      - nanobot/agent/loop.py                 # coalescing window for idle parents
+    approach:
+      - Keep the persisted message shape (injected_event=subagent_result) so the WebUI and session files keep working; add fields, do not rename.
+      - Background results with the user away go through utils/evaluator.py notification gate.
+      - Large outputs -> <agent workspace>/runs/<root>/<run>/ (temp dir for private sessions); result carries paths.
+    done_when:
+      - I6 test: 4 children finishing while parent idle -> exactly 1 parent model call.
+      - join(mode=any|all|first_ok, timeout) tests pass.
+
+  - id: P06
+    title: Gates and cascade routing
+    status: todo
+    depends_on: [P05]
+    goal: Acceptance gates (schema, check command, reviewer) with one tier escalation (§4.3).
+    create:
+      - nanobot/orchestration/gates.py
+      - tests/orchestration/test_gates.py
+    touch:
+      - nanobot/orchestration/supervisor.py
+      - nanobot/orchestration/router.py
+    approach:
+      - Check commands run through the existing exec tool machinery and sandbox, never a raw subprocess.
+      - Gate output is attached to the retry prompt and to the final Result.
+    done_when:
+      - Failing gate escalates exactly once, then returns partial with gate output.
+
+  - id: P07
+    title: Ledger and durability
+    status: todo
+    depends_on: [P05]
+    goal: Event-sourced run ledger, outbox delivery (I4), restart semantics, detached runs (§2.4, §4.5, §4.6).
+    create:
+      - nanobot/orchestration/ledger.py       # JSONL per root under <config-dir>/runs/<workspace-id>/, same file locks as sessions
+      - tests/orchestration/test_chaos.py     # kill at random points over 1000 simulated runs
+    touch:
+      - nanobot/session/recovery.py           # replay ledgers on startup
+      - nanobot/session/manager.py            # child runs as transient sessions keyed run:<id> (additive)
+      - nanobot/orchestration/supervisor.py
+    approach:
+      - Store model requests as deltas over the previous request plus a hash, not full copies.
+      - Resume only runs whose profile is read-only; others report interrupted with partial work.
+      - Private sessions: in-memory ledger (I5).
+    done_when:
+      - Chaos test: 0 lost, 0 duplicated results.
+      - A detached run survives 3 simulated restarts and completes within budget.
+
+  - id: P08
+    title: Communication
+    status: todo
+    depends_on: [P05]
+    goal: send (steer/answer/note), ask travelling up the tree to the user; session messages folded in.
+    create:
+      - tests/orchestration/test_messages.py
+    touch:
+      - nanobot/agent/tools/agents.py         # send, stop, runs, ask
+      - nanobot/agent/tools/session_messages.py   # becomes alias over send; keep limits and result text
+    approach:
+      - ask timeout -> child receives "proceed on your best assumption" and continues.
+    done_when:
+      - Steer reaches a running child before its next model call.
+      - Unanswerable ask reaches the user's channel; the reply resumes the child.
+      - Existing session-message tests pass unchanged through the alias.
+
+  - id: P09
+    title: Converge automations and split the loop
+    status: todo
+    depends_on: [P07]
+    goal: Cron, triggers, heartbeat, goal continuations become runs; AgentLoop becomes ingress + session run + thin facade (§8).
+    touch:
+      - nanobot/agent/loop.py
+      - nanobot/agent/automation_turns.py
+      - nanobot/agent/cron_turns.py
+      - nanobot/triggers/
+      - nanobot/session/turn_continuation.py
+    approach:
+      - Move code in behaviour-preserving PRs first; delete coordinators only after their tests pass through runs.
+      - Keep AgentLoop public API (process_direct, run, aclose, SDK entry points) stable.
+    done_when:
+      - Automation, goal and recovery tests pass unchanged.
+      - The three legacy throttles are gone; scheduler owns concurrency.
+
+  - id: P10
+    title: Worktrees and fork caching
+    status: todo
+    depends_on: [P06, P04]
+    goal: isolation=worktree with patch merge (§4.4); context=fork with byte-stable prefixes (I8, §4.1).
+    create:
+      - nanobot/orchestration/worktree.py
+      - tests/orchestration/test_worktree.py
+      - tests/orchestration/test_prefix_stability.py
+    touch:
+      - nanobot/agent/context.py              # move per-run dynamic values after the last cache breakpoint
+      - nanobot/agent/tools/registry.py       # deterministic tool ordering if not already stable
+    approach:
+      - git worktree for git projects; copy-on-write snapshot otherwise (open decision §12.4; pick one and document it).
+      - Merge patches in completion order; re-run the gate on the merged tree; report conflicts, never auto-resolve.
+    done_when:
+      - 3 parallel coder runs on independent files merge cleanly; overlapping edits are reported as conflicts.
+      - I8 test passes for Anthropic and OpenAI-compatible request shapes.
+
+  - id: P11
+    title: Chat-native control and WebUI run tree
+    status: todo
+    depends_on: [P08]
+    goal: Live status message per root run, reply-to-steer, /agents commands, WebUI run tree (§4.9).
+    touch:
+      - nanobot/command/builtin.py            # /agents, /agents stop|steer|log
+      - nanobot/session/webui_turns.py
+      - nanobot/channels/*                    # only channels that support message edits; others get periodic plain updates
+      - webui/src/
+    approach:
+      - Channel specifics stay inside channel packages (.agent/design.md).
+    done_when:
+      - First visible progress < 2 s after delegation in WebUI and Telegram tests.
+      - webui tests and build green.
+
+  - id: P12
+    title: Replay, branching, learned routing proposals
+    status: todo
+    depends_on: [P07, P10]
+    goal: Replay any run from its ledger; branch from step N with another tier/profile; offline routing proposals (§4.7, §4.8).
+    create:
+      - nanobot/orchestration/replay.py
+      - tests/orchestration/test_replay.py
+    approach:
+      - Replay uses recorded tool outputs until the branch point, then runs in a worktree or dry-run sandbox.
+      - Proposals are written as a diff to profile files for a human to accept; nothing auto-applies.
+    done_when:
+      - Replay reproduces a recorded transcript byte for byte up to the branch point.
+
+  - id: P13
+    title: Benchmark, docs, deprecations
+    status: todo
+    depends_on: [P09, P11, P12]
+    goal: Prove the scoreboard (§6, §7), document, deprecate aliases.
+    create:
+      - scripts/orchestration_bench/          # ~30 tasks with checkers; runs against baseline spawn and new kernel
+      - docs/orchestration.md                 # user guide
+    touch:
+      - docs/architecture.md, docs/configuration.md, docs/chat-commands.md, README.md
+    done_when:
+      - Scoreboard published in the PR: success, cost, wall time, cache-hit rate vs P00 baseline.
+      - Aliases emit deprecation notices; removal scheduled for the next release, not this one.
+
+parallelism:   # phases that may proceed at the same time on separate branches
+  - [P02, P03]
+  - [P06, P07, P08]
+  - [P10, P11]
+
+stop_and_ask_when:
+  - A phase requires changing a persisted format incompatibly.
+  - A MUST rule conflicts with the architecture; the rule wins until a human decides.
+  - Full-suite runtime grows by more than 20% or any test needs a real network or API key.
+  - An open decision in architecture.md §12 blocks progress.
