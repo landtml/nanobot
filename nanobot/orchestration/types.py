@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -78,6 +79,7 @@ class RunSpec:
     provider_state: ProviderConversationState | None = None
     llm_usage_source: LLMUsageSource | None = None
     events: EventSink = NO_EVENTS
+    mailbox: asyncio.Queue[RunMessage] | None = None
     id: str | None = None
     root: str | None = None
     parent: str | None = None

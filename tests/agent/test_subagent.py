@@ -290,3 +290,175 @@ async def test_spawned_subagent_inherits_llm_usage_source(tmp_path):
 
     spec = sm.runner.run.call_args.args[0]
     assert spec.llm_usage_source == "cron"
+
+
+@pytest.mark.asyncio
+async def test_subagent_runs_concurrency_safe_tools_in_parallel(tmp_path, monkeypatch):
+    import asyncio
+    from typing import Any
+
+    from orchestration.sim import ScriptedProvider
+
+    from nanobot.agent.tools.base import Tool
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.config.schema import ToolsConfig, WebToolsConfig
+    from nanobot.providers.base import LLMResponse, ToolCallRequest
+
+    started: set[str] = set()
+    completed: set[str] = set()
+    both_started = asyncio.Event()
+
+    class ProbeTool(Tool):
+        def __init__(self, tool_name: str) -> None:
+            self._name = tool_name
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        @property
+        def description(self) -> str:
+            return "A concurrency probe."
+
+        @property
+        def parameters(self) -> dict[str, Any]:
+            return {"type": "object", "properties": {}}
+
+        @property
+        def read_only(self) -> bool:
+            return True
+
+        async def execute(self, **_kwargs: Any) -> str:
+            started.add(self.name)
+            if len(started) == 2:
+                both_started.set()
+            try:
+                await asyncio.wait_for(both_started.wait(), timeout=0.5)
+            except TimeoutError:
+                return "tools did not overlap"
+            completed.add(self.name)
+            return "complete"
+
+    provider = ScriptedProvider(
+        {
+            "child": [
+                LLMResponse(
+                    content="run both tools",
+                    tool_calls=[
+                        ToolCallRequest(id="a", name="safe_a", arguments={}),
+                        ToolCallRequest(id="b", name="safe_b", arguments={}),
+                    ],
+                ),
+                LLMResponse(content="child complete"),
+            ],
+        },
+        route=lambda _messages: "child",
+    )
+    manager = SubagentManager(
+        workspace=tmp_path,
+        bus=MessageBus(),
+        max_tool_result_chars=1000,
+        tools_config=ToolsConfig(web=WebToolsConfig()),
+        memory=MagicMock(),
+    )
+    tools = ToolRegistry()
+    tools.register(ProbeTool("safe_a"))
+    tools.register(ProbeTool("safe_b"))
+    monkeypatch.setattr(manager, "_build_tools", lambda tools_config=None: tools)
+    monkeypatch.setattr(manager, "_build_subagent_prompt", lambda workspace=None: "test prompt")
+
+    result = await asyncio.wait_for(
+        manager.run_inline(task="run the tools", runtime=_runtime(provider)),
+        timeout=2.0,
+    )
+
+    assert result == "child complete"
+    assert started == {"safe_a", "safe_b"}
+    assert completed == {"safe_a", "safe_b"}
+
+
+@pytest.mark.asyncio
+async def test_subagent_mailbox_injects_queued_messages_before_next_model_call(tmp_path, monkeypatch):
+    import asyncio
+    from typing import Any
+
+    from orchestration.sim import ScriptedProvider
+
+    from nanobot.agent.subagent import SubagentStatus
+    from nanobot.agent.tools.base import Tool
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.config.schema import ToolsConfig, WebToolsConfig
+    from nanobot.providers.base import LLMResponse, ToolCallRequest
+
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+
+    class WaitingTool(Tool):
+        @property
+        def name(self) -> str:
+            return "wait_for_input"
+
+        @property
+        def description(self) -> str:
+            return "Waits while input arrives."
+
+        @property
+        def parameters(self) -> dict[str, Any]:
+            return {"type": "object", "properties": {}}
+
+        async def execute(self, **_kwargs: Any) -> str:
+            tool_started.set()
+            await release_tool.wait()
+            return "tool finished"
+
+    provider = ScriptedProvider(
+        {
+            "child": [
+                LLMResponse(
+                    content="start waiting",
+                    tool_calls=[
+                        ToolCallRequest(id="wait", name="wait_for_input", arguments={}),
+                    ],
+                ),
+                LLMResponse(content="child resumed"),
+            ],
+        },
+        route=lambda _messages: "child",
+    )
+    manager = SubagentManager(
+        workspace=tmp_path,
+        bus=MessageBus(),
+        max_tool_result_chars=1000,
+        tools_config=ToolsConfig(web=WebToolsConfig()),
+        memory=MagicMock(),
+    )
+    tools = ToolRegistry()
+    tools.register(WaitingTool())
+    monkeypatch.setattr(manager, "_build_tools", lambda tools_config=None: tools)
+    monkeypatch.setattr(manager, "_build_subagent_prompt", lambda workspace=None: "test prompt")
+    status = SubagentStatus(
+        task_id="child-1",
+        label="child",
+        task_description="test mailbox",
+        started_at=0.0,
+    )
+    child_task = asyncio.create_task(manager._run_admitted_subagent(
+        "child-1",
+        "test mailbox",
+        "child",
+        {"channel": "cli", "chat_id": "direct", "session_key": None},
+        status,
+        _runtime(provider),
+        announce=False,
+    ))
+
+    try:
+        await asyncio.wait_for(tool_started.wait(), timeout=1.0)
+        await status.mailbox.put({"role": "user", "content": "first steer"})
+        await status.mailbox.put({"role": "user", "content": "second steer"})
+    finally:
+        release_tool.set()
+        await asyncio.wait_for(child_task, timeout=2.0)
+
+    messages = provider.calls[1].messages
+    assert {"role": "user", "content": "first steer\n\nsecond steer"} in messages

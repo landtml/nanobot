@@ -95,7 +95,7 @@ phases:
 
   - id: P01
     title: Single executor
-    status: in_progress
+    status: in_review
     depends_on: [P00]
     goal: One code path builds AgentRunSpec for session turns and subagents (I1). Children gain concurrent tools and an injection mailbox.
     create:
@@ -106,6 +106,7 @@ phases:
     touch:
       - nanobot/agent/loop.py                 # _run_agent_loop delegates spec construction
       - nanobot/agent/subagent.py             # _run_admitted_subagent delegates spec construction
+      - tests/agent/test_subagent.py           # child concurrency and mailbox delivery
     approach:
       - First PR moves construction without behaviour change; second PR enables concurrent_tools and injection_callback for children.
       - Mailbox for children = asyncio.Queue drained by the existing injection_callback contract.
